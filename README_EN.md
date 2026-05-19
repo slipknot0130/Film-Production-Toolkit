@@ -49,10 +49,104 @@ The system **automatically detects** the drama type based on text volume and app
 
 OCD-level continuity supervision — Deconstruct every scene by physical space, extract prop lists and wardrobe requirements.
 
-### 🎥 Storyboard Workbench
+### 🎥 AI Video Storyboard Prompt Engine (Industrial-Grade Multi-Agent Generation)
 
-- **CrewAI 4-Agent Industrial Storyboard Matrix**: Storyboard Director → Art Director → QA Director → Output
-- **9-Column Industrial Storyboard Table**: Shot size / Angle / Description / Chinese prompt / English prompt / Dialogue / Sound / Duration / Notes
+This is not your average storyboard breakdown — we've built a complete **AI video generation lens logic system** from the ground up, so LLM outputs can be fed directly into video tools like Kling and Jimeng without manual re-processing.
+
+#### 20 Scenario Mapping Engine
+
+Pre-defined 20 industrial-grade scenarios (E01–E20), each locking in focal length + aperture + camera position + motion core combo, preventing AI free-styling from causing perspective conflicts or style drift:
+
+| Scenario ID | Typical Scene | Core Combo |
+|------------|--------------|-----------|
+| E01 | Protagonist Awakening | Mid 50-85mm + f/4 + low-angle mid-shot + slow track-in |
+| E02 | Villain Entrance | Wide 24-35mm + f/2.0 + low-angle static + subtle push |
+| E06 | Rage Outburst | Wide + large aperture + handheld fast shake |
+| E13 | Kubrickian Alienation | Strong symmetrical center + wide + slow push |
+| E15 | Divine Epiphany | Backlit silhouette + overexposed background + slow crane-up |
+| E19 | Object Parabolic Tracking | Mid 85mm + f/4 + side-level + whip pan Catch |
+
+#### 80/15/5 Weight Mechanism
+
+| Weight | Type | Constraint |
+|--------|------|-----------|
+| **80%** | Core Combo (locked) | From Scenario ID, all mandatory, no substitution or deletion |
+| **15%** | Auxiliary Anchors | Enhance emotional details, pick 1–2 items |
+| **5%** | Enhancer | Only at emotional hit points, max 1 shot per scene |
+
+#### 6+1 Required Storyboard Fields
+
+Every shot must output 6 required fields + 1 optional constraint field:
+
+| Field | Description |
+|------|-------------|
+| **Focal Length** | Ultra-wide / Wide / Standard / Mid / Long / Macro |
+| **Aperture** | Ultra-large f/1.2–f/1.8 / Large f/2.0–f/2.8 / Medium f/4–f/5.6 / Small f/8+ |
+| **Camera Position** | **5-Element Template**: camera position + height + angle + subject action + shot size |
+| **Composition** | Composition rule (rule of thirds / golden ratio / framing / diagonal / negative space / symmetry) + spatial zone content (foreground / left / right / background) |
+| **Camera Motion** | Bilingual professional terms (Dolly In / Steadicam / Hitchcock Zoom / handheld breathing) |
+| **Subject Action & Expression** | Dialogue must be embedded in this line, no separate field |
+| **Constraint (optional)** | AI error-prone constraints (e.g. "no subtitles" "costume identical to previous shot") |
+
+#### 5-Dimensional Visual Continuity
+
+5 continuity rules enforced between adjacent shots:
+
+| Dimension | Rule |
+|-----------|------|
+| **A. 180° Axis** | Camera never crosses imaginary axis in dialogue scenes (except intentional break) |
+| **B. Eyeline Match** | Character looks right in Shot A → Character enters from left in Shot B and looks left |
+| **C. Action Continuity 60%** | End action of Shot A = 60–80% continuation at start of Shot B, no action jumps |
+| **D. Prop State Continuity** | Water level / cigarette length / costume consistency across same scene |
+| **E. Shot Size Variation** | No 3+ consecutive shots of same shot size (same-size cuts = jump-cut anxiety) |
+
+#### Perspective Shielding Rule (Fixes AI Video "Face on Back of Head")
+
+When camera position is **behind / over-shoulder / rear-side**, facial expression descriptions are forcibly removed:
+- ❌ "frowning, tears rolling, glaring" → ✓ "shoulders trembling, back stiff, clenched fists"
+- ❌ "eyes burning with anger" → ✓ "brows furrowed, jaw clenched, fists shaking slightly"
+- Prevents AI video models from generating facial features on the back of heads
+
+#### Abstract Description Translation Engine
+
+Automatically converts literary abstract emotions into **shootable physical actions**:
+
+| Literary Description | Translated Result |
+|---------------------|-------------------|
+| "His heart collapsed" | Fingers pinching other hand under table, breathing short but face remains calm |
+| "Burning with rage" | Brows furrowed, jaw clenched, clenched fists trembling slightly |
+| "She summoned courage" | Straw stirs milk tea one beat slower, head lifts 0.5s later than opponent |
+
+#### Prop Physical Perspective Rule
+
+- **Item back facing camera**: When character reads letter, paper back faces camera, no text visible
+- **Prop dimensional reduction**: "Conscription notice" → "a piece of rough paper"; "secret letter" → "a folded letter in hand"
+- **No physics violations**: Seal face never faces camera (unless specifically shooting item close-up)
+
+#### Drama/Action Rhythm Engine
+
+| Type | Motion Style | Shot Density | Shot Size |
+|------|-------------|-------------|-----------|
+| Drama | Static or slow motion | 1–3 per segment (sparse) | Close-up / ECU |
+| Action | Handheld fast shake + jump cuts | 2–3× drama density (dense) | Rapid alternation |
+
+- Drama dialogue: Auto-insert **reaction shots** every 2–3 lines, focusing on listener's expression
+- Action: Rapid shot-size jumps (ECU → Wide → Side) to build tension
+
+#### 10-Column Industrial Storyboard Matrix Output
+
+Final output is standard JSON array, directly renderable as DataFrame table:
+
+| Column | Content |
+|--------|---------|
+| Shot # / Focal Length / Aperture / Camera Position / Composition / Motion / Subject Action / Duration |
+| **Image Prompt (Bilingual)** | Minimal 5 elements: shot size + character + action + scene + $StyleTokens auto-appended |
+| **Video Motion Prompt (Chinese)** | Includes physical motion trajectory (parabolic / bounce / caught mid-air), for Kling / Jimeng |
+| **Visual Continuity Suggestion** | Guides AI video generation strategy (reuse foreground ref / previous shot as underlay / new scene weight adjustment) |
+
+---
+
+- **CrewAI 4-Agent Industrial Storyboard Matrix**: Storyboard Director → Art Director → VFX Director → QA Director
 - **Global Art Style Tokens**: Customizable StyleTokens automatically appended to every shot's English prompt
 
 ### 🔄 Create-Analyze-Modify Closed Loop
