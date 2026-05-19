@@ -1,0 +1,45 @@
+# =============================================================================
+# AI 剧本创作和制片管理综合工具 — .gitignore
+# =============================================================================
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── 环境与密钥（绝对不能上传）──
+.env
+*.key
+*.pem
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS 元数据 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── WorkBuddy / Skill 文件（保留在本地）──
+.workbuddy/
+
+# ── 虚拟环境 ──
+venv/
+.venv/
+env/
+
+# ── 日志与临时文件 ──
+*.log
+*.tmp
+
+# ── 合并计划（内部文档，不上传）──
+MERGE_PLAN.md
