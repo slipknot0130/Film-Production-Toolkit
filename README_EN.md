@@ -193,7 +193,7 @@ Script Creation → One-click Analysis → Differentiated Review → AI One-clic
 | China | International | Local |
 |-------|--------------|-------|
 | DeepSeek | OpenAI (GPT-4o) | Ollama |
-| SiliconFlow | Claude (Anthropic) | vLLM |
+| SiliconFlow | Claude (Anthropic) | |
 | Alibaba Qwen | Gemini (Google) | |
 | Kimi (Moonshot) | Groq | |
 | GLM (Zhipu) | Mistral | |

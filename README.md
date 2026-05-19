@@ -193,7 +193,7 @@
 | 国内 | 海外 | 本地 |
 |------|------|------|
 | DeepSeek | OpenAI (GPT-4o) | Ollama |
-| 硅基流动 SiliconFlow | Claude (Anthropic) | vLLM |
+| 硅基流动 SiliconFlow | Claude (Anthropic) | |
 | 阿里通义 Qwen | Gemini (Google) | |
 | Kimi (Moonshot) | Groq | |
 | GLM (智谱) | Mistral | |

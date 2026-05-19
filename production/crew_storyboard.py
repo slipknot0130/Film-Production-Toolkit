@@ -13,7 +13,6 @@ crew_storyboard.py — CrewAI 纯后端模块（无 Gradio 依赖）
 
 LLM 路由规则（由 engine_choice 决定）：
   - "Ollama (本地)"  → model="ollama/<model_name>",  base_url=api_base
-  - "vLLM (本地)"    → model="openai/<model_name>",  base_url=api_base
   - 其他（云端API）  → model="deepseek/deepseek-chat", api_key=api_key
 """
 
@@ -53,12 +52,6 @@ def create_llm(engine_choice: str, api_base: str, api_key: str, model_name: str)
         llm = LLM(
             model=f"ollama/{model_name}",
             base_url="http://localhost:11434"
-        )
-    elif "vLLM" in engine_choice:
-        # vLLM：LiteLLM openai-compatible 路由
-        llm = LLM(
-            model=f"openai/{model_name}",
-            base_url=api_base
         )
     else:
         # 云端 API（DeepSeek、OpenAI、Moonshot 等）

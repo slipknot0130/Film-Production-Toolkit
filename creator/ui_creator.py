@@ -131,7 +131,7 @@ def _execute_showrunner_thread(creative_idea, script_format, provider, base_url,
     if is_micro_drama_mode(script_format):
         creator_add_log("🔥 检测到竖屏微短剧模式，注入多巴胺爽剧规则", "system")
 
-    if not api_key and provider not in ("本地 Ollama", "本地 vLLM"):
+    if not api_key and provider != "本地 Ollama":
         creator_add_log("❌ 请先在侧边栏配置 API Key", "error")
         _set_ss("workflow_running", False)
         return

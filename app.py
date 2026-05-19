@@ -151,7 +151,7 @@ with st.sidebar:
 
     # 连接测试
     if st.button("🔗 测试连接", use_container_width=True):
-        if not st.session_state.api_key and provider not in ("本地 Ollama", "本地 vLLM"):
+        if not st.session_state.api_key and provider != "本地 Ollama":
             st.warning("⚠️ 请先输入 API Key")
         else:
             with st.spinner("正在测试连接..."):
