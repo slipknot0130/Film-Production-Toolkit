@@ -209,14 +209,14 @@ def read_docx(file):
 
 
 def read_uploaded_file(uploaded_file):
-    """读取上传的文件（支持 .docx 和 .txt）"""
+    """读取上传的文件（支持 .docx / .txt / .md）"""
     if uploaded_file is None:
         return ""
 
     file_name = uploaded_file.name.lower()
     if file_name.endswith('.docx'):
         return read_docx(uploaded_file)
-    elif file_name.endswith('.txt'):
+    elif file_name.endswith(('.txt', '.md')):
         return str(uploaded_file.read(), encoding='utf-8')
     else:
         # 尝试作为文本读取

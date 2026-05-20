@@ -73,33 +73,39 @@ def render_analysis(uploaded_file):
     st.caption("自动检测剧本类型 → 微短剧/短剧走情绪导向 · 中剧/长剧走结构导向 · 电影走好莱坞工业标准")
 
     # ── 获取剧本内容 ──
-    script_content = ""
-
-    # 优先级1：自动加载标记（创作→分析跳转时设置）
+    # 优先级1：来自创作流的自动加载（创作→分析跳转时设置）
     if st.session_state.get("analysis_auto_load", False):
         creator_script = st.session_state.get("creator_script_content", "")
         if creator_script:
-            script_content = creator_script
-            st.session_state.analysis_auto_load = False  # 用完清除
+            st.session_state.analysis_loaded_script = creator_script
+            st.session_state.analysis_auto_trigger = True  # 标记需要自动触发分析
+        st.session_state.analysis_auto_load = False  # 用完清除
 
     # 优先级2：手动上传的文件
-    if not script_content and uploaded_file is not None:
-        script_content = read_uploaded_file(uploaded_file)
+    if uploaded_file is not None:
+        uploaded_content = read_uploaded_file(uploaded_file)
+        if uploaded_content:
+            st.session_state.analysis_loaded_script = uploaded_content
 
     # 优先级3：创作流已有剧本（手动加载按钮）
-    if not script_content:
-        from shared.session import CREATOR_SCRIPTS
+    if not st.session_state.get("analysis_loaded_script"):
         creator_script = st.session_state.get("creator_script_content", "")
         if creator_script:
             if st.button("📥 从创作流加载已生成的剧本", type="primary"):
-                script_content = creator_script
+                st.session_state.analysis_loaded_script = creator_script
                 st.rerun()
 
+    # 取出当前已加载的剧本
+    script_content = st.session_state.get("analysis_loaded_script", "")
+
     if not script_content:
-        st.info("📭 请在侧边栏上传剧本文件（.docx / .txt），或在「剧本创作」中生成后转入分析")
+        st.info("📭 请在侧边栏上传剧本文件（.docx / .txt / .md），或在「剧本创作」中生成后转入分析")
         return
 
-    st.success(f"✅ 已加载剧本，共 **{len(script_content):,}** 字符")
+    # 区分来源用于提示
+    is_auto = st.session_state.get("analysis_auto_trigger", False)
+    st.success(f"✅ 已加载剧本，共 **{len(script_content):,}** 字符" +
+               ("（来自创作流，自动启动分析中...）" if is_auto else ""))
 
     # ── 保存当前分析剧本（供跨模式传递使用） ──
     st.session_state.analysis_current_script = script_content
@@ -173,8 +179,9 @@ def render_analysis(uploaded_file):
 
     st.markdown(f"**当前审核模式**：{_FORMAT_LABELS.get(format_category, '自动')}")
 
-    # ── 启动分析按钮 ──
-    if st.button("🚀 启动剧本医生分析", type="primary", use_container_width=True):
+    # ── 启动分析按钮（手动 or 自动触发） ──
+    auto_trigger = st.session_state.pop("analysis_auto_trigger", False)
+    if st.button("🚀 启动剧本医生分析", type="primary", use_container_width=True) or auto_trigger:
         provider, client, model_name, kwargs = _get_production_llm()
 
         if "Ollama" in provider:
@@ -204,9 +211,12 @@ def render_analysis(uploaded_file):
 
     # ── 跨模式导航：转入剧本创作修改 ──
     st.markdown("---")
+    has_result = bool(st.session_state.get("last_analysis_result"))
     col_nav1, col_nav2 = st.columns([1, 1])
     with col_nav1:
-        if st.button("✏️ 转入剧本创作进行修改", use_container_width=True, type="secondary"):
+        btn_label = "✏️ 带审查意见转入创作流修改" if has_result else "✏️ 转入剧本创作进行修改"
+        btn_type = "primary" if has_result else "secondary"
+        if st.button(btn_label, use_container_width=True, type=btn_type):
             # 携带剧本文本 + 分析反馈 → 创作模式
             st.session_state.active_tab = "📝 剧本创作"
             st.session_state.cross_mode_script_text = st.session_state.analysis_current_script
@@ -214,7 +224,10 @@ def render_analysis(uploaded_file):
             st.session_state.cross_mode_analysis_feedback = st.session_state.get("last_analysis_result")
             st.rerun()
     with col_nav2:
-        st.caption("💡 切换到创作模式后，剧本内容和分析反馈将自动携带，可直接编辑后返回分析")
+        if has_result:
+            st.caption("💡 将携带剧本文本 + 审查意见跳转到创作流，可直接一键AI修改后返回二次审查")
+        else:
+            st.caption("💡 切换到创作模式后，剧本内容将自动携带，可直接编辑后返回分析")
 
 
 def _render_analysis_result(res, format_category):

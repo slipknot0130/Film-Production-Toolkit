@@ -176,16 +176,12 @@ with st.sidebar:
     st.markdown("---")
 
     # ── 工作模式Tab（核心导航）──
+    # 注意：radio 不加 key，靠 index 控制选中项；用户手动点 radio 时通过 active_tab 返回值同步 session_state
+    _TAB_OPTIONS = ["📝 剧本创作", "🎬 剧本分析", "💰 预算审计", "📋 场景拆解", "🎥 分镜工作台"]
     st.markdown("## 🎭 工作模式")
     active_tab = st.radio(
         "选择当前工作模式",
-        [
-            "📝 剧本创作",
-            "🎬 剧本分析",
-            "💰 预算审计",
-            "📋 场景拆解",
-            "🎥 分镜工作台",
-        ],
+        _TAB_OPTIONS,
         captions=[
             "创意 → 大纲 → 剧本全流程（Showrunner/Writer/Doctor）",
             "好莱坞剧本医生（Ghost/Lie/Flaw + Save the Cat 15节拍）",
@@ -193,7 +189,7 @@ with st.sidebar:
             "强迫症场记统筹（物理空间场景解构）",
             "CrewAI 4-Agent工业级分镜矩阵",
         ],
-        index=["📝 剧本创作", "🎬 剧本分析", "💰 预算审计", "📋 场景拆解", "🎥 分镜工作台"].index(
+        index=_TAB_OPTIONS.index(
             st.session_state.get("active_tab", "📝 剧本创作")
         ),
     )
@@ -209,7 +205,7 @@ with st.sidebar:
     if active_tab != "📝 剧本创作":
         # 文件上传（制片流需要）
         st.markdown("### 📁 导入剧本文件")
-        uploaded_file = st.file_uploader("导入文本文档 (.docx / .txt)", type=["docx", "txt"],
+        uploaded_file = st.file_uploader("导入文本文档 (.docx / .txt / .md)", type=["docx", "txt", "md"],
                                           key="production_file_upload")
 
         # 美术风格词（分镜工作流需要）

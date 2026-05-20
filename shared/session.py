@@ -99,6 +99,14 @@ def init_cross_mode_state():
     if "analysis_auto_load" not in st.session_state:
         st.session_state.analysis_auto_load = False
 
+    # 剧本分析自动触发标记（创作→分析后自动启动分析）
+    if "analysis_auto_trigger" not in st.session_state:
+        st.session_state.analysis_auto_trigger = False
+
+    # 分析页已加载的剧本文本（持久化，避免 rerun 后丢失）
+    if "analysis_loaded_script" not in st.session_state:
+        st.session_state.analysis_loaded_script = ""
+
     # 上次分析结果（分析→创作时作为参考）
     if "last_analysis_result" not in st.session_state:
         st.session_state.last_analysis_result = None
