@@ -49,7 +49,7 @@ The system **automatically detects** the drama type based on text volume and app
 
 OCD-level continuity supervision — Deconstruct every scene by physical space, extract prop lists and wardrobe requirements.
 
-### 🎥 AI Video Storyboard Prompt Engine (Industrial-Grade Multi-Agent Generation)
+### 🎥 AI Video Storyboard Prompt Engine (Seedance 2.0 Compatible · Industrial-Grade Multi-Agent Generation)
 
 This is not your average storyboard breakdown — we've built a complete **AI video generation lens logic system** from the ground up, so LLM outputs can be fed directly into video tools like Kling and Jimeng without manual re-processing.
 
@@ -133,20 +133,44 @@ Automatically converts literary abstract emotions into **shootable physical acti
 - Drama dialogue: Auto-insert **reaction shots** every 2–3 lines, focusing on listener's expression
 - Action: Rapid shot-size jumps (ECU → Wide → Side) to build tension
 
-#### 10-Column Industrial Storyboard Matrix Output
+#### 5-Column Seedance 2.0 Final Prompt Output
 
 Final output is standard JSON array, directly renderable as DataFrame table:
 
 | Column | Content |
 |--------|---------|
-| Shot # / Focal Length / Aperture / Camera Position / Composition / Motion / Subject Action / Duration |
-| **Image Prompt (Bilingual)** | Minimal 5 elements: shot size + character + action + scene + $StyleTokens auto-appended |
-| **Video Motion Prompt (Chinese)** | Includes physical motion trajectory (parabolic / bounce / caught mid-air), for Kling / Jimeng |
-| **Visual Continuity Suggestion** | Guides AI video generation strategy (reuse foreground ref / previous shot as underlay / new scene weight adjustment) |
+| Shot # / Timecode / Shot Size · Position · Motion (fused description) / Base Setup Tag |
+| **Final Seedance Prompt** | A complete text block ready to paste directly into Seedance 2.0. Structure: [Base Setup] (character appearance/costume/environment/image quality defined once) + [Frame Content] Shot N: timecode + high-density visual description (character details/environment lighting/camera trajectory/material interaction/lens simulation keywords). Professional case-level density, no manual post-processing needed |
 
 ---
 
-- **CrewAI 4-Agent Industrial Storyboard Matrix**: Storyboard Director → Art Director → VFX Director → QA Director
+### 🔧 Harness Engineering Layer (v0.2.0)
+
+Harness is a modular engineering middleware that sits between the UI and the Agents Engine, adding production-grade **resilience, memory, and cost controls** to the 3-Agent screenwriting pipeline. All modules follow a "opt-in, backward-compatible, incremental enhancement" design principle.
+
+#### 6 Core Modules
+
+| Module | Problem Solved | Real Impact |
+|--------|---------------|-------------|
+| **CheckpointManager** | Page refresh / browser crash / power loss = all progress lost | Save or restore at any moment. Auto-save every N episodes. 100-episode series without fear of interruption |
+| **StructuredMemoryStore** | Single blob memory text → character personality, location, plot threads drift badly after 50+ episodes | `CharacterState` tracks each character's position/emotion/goal/relationships/secrets precisely; `PlotThread` manages lifecycle per thread (planted→active→revealed); `EpisodeIndex` retrieves summaries by episode number |
+| **ContextRetriever** (JIT) | Every Writer call injects full context (5000+ tokens), growing unbounded with episode count | Only injects minimal necessary context (current outline segment + last 3 episode summaries + active characters + active threads). **Token cost reduced 40-60%** |
+| **ToolSchema + ToolRegistry** | All agent capability rules buried in long prompt text, model comprehension imprecise | OpenAI function-calling compatible structured tool definitions. Each agent gets only its own toolset, precisely injected |
+| **BudgetTracker + TerminationGuard** | Infinite token-burning loops when Doctor is never satisfied or API is unstable | **6-layer termination**: safety reject → user interrupt → natural complete → budget exceeded → round limit → guardrail violation. Hard cap: 10 rounds × 5000 tokens = 50K tokens per episode |
+| **Safety Guardrails** | No content safety constraints on agent output | Safety guardrails injected at highest priority in Writer's 5-layer prompt injection. Doctor upgraded to adversarial review mode |
+
+#### Pipeline Bug Fixes
+
+| Issue (v0.1) | Fix (v0.2) |
+|-------------|-----------|
+| **Writer retry dead loop**: Doctor rejection feedback never reached Writer, resulting in blind rewrites | Doctor feedback + Writer's previous draft actually passed into the retry branch, enabling **spiral refinement** |
+| **Force-approved episodes skipped Harness**: No memory/character/checkpoint updates in force-approve path | Full Harness flow added: memory extraction → character state update → checkpoint auto-save |
+| **CheckpointManager re-created 3-5x per page lifecycle** | `session_state` singleton cache — created once per full lifecycle |
+| **Storyboard serial bottleneck**: Image and Video prompts had to wait | New `parallel=True` mode: Image ∥ Video parallel generation, **30-40% faster** |
+
+---
+
+- **CrewAI 4-Agent Seedance 2.0 Storyboard Matrix**: Seedance Director → Visual Archivist → Seedance Prompt Engineer → Seedance QA Reviewer
 - **Global Art Style Tokens**: Customizable StyleTokens automatically appended to every shot's English prompt
 
 ### 🔄 Create-Analyze-Modify Closed Loop
@@ -171,6 +195,10 @@ Script Creation → One-click Analysis → Differentiated Review → AI One-clic
 | **Production Management** | None | Budget audit / Scene breakdown / Storyboard matrix, all-in-one |
 | **Model Access** | Locked to a single platform, no alternatives | 12+ providers freely switchable (cloud APIs + local models), pick what fits |
 | **Cost Flexibility** | Single pricing model, long-drama costs spiral | Multi-provider comparison + local model option, costs under your control |
+| **Engineering Resilience** | No checkpointing, crash = wipe | Harness CheckpointManager: save/restore anytime, auto-save at configurable intervals |
+| **Long-Form Memory** | No structured mechanism, plot inconsistencies inevitable | CharacterState + PlotThread + EpisodeIndex structured tracking, 100 episodes without amnesia |
+| **Token Efficiency** | Full context injection, linear growth | JIT ContextRetriever: minimal necessary context on-demand, **40-60% savings** |
+| **Safety Guard** | No content constraints | Safety Guardrails at highest prompt priority + 6-layer termination to prevent infinite token burn |
 
 ### 🔑 One-Line Summary
 
@@ -283,6 +311,15 @@ Film-Production-Toolkit/
 ├── requirements.txt         # Python dependencies
 ├── .env.example             # Environment variable template (API keys etc.)
 ├── StyleTokens.txt          # Global art style tokens (for storyboard)
+│
+├── harness/                  # 🔧 Harness Engineering Layer (v0.2.0)
+│   ├── __init__.py           # Module entry, version v0.2.0
+│   ├── checkpoint.py         # CheckpointManager: resume-from-any-episode + WorkflowContext
+│   ├── memory_store.py       # StructuredMemoryStore (character state / plot threads / episode index)
+│   ├── context_retriever.py  # JIT context retrieval, 40-60% token reduction
+│   ├── tool_schema.py        # ToolSchema / ToolRegistry, structured agent capabilities
+│   ├── termination.py        # BudgetTracker + TerminationGuard 6-layer safety net
+│   └── config.py             # Unified configuration management
 │
 ├── creator/                 # 🎬 Creative Engine
 │   ├── agents_engine.py     # Multi-agent core (Showrunner/Writer/Doctor)

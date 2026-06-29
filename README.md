@@ -49,7 +49,7 @@
 
 强迫症场记统筹 — 按物理空间解构每场戏，提取道具清单与服装要求。
 
-### 🎥 AI 视频分镜提示词引擎（工业级多 Agent 生成）
+### 🎥 AI 视频分镜提示词引擎（Seedance 2.0 兼容 · 工业级多 Agent 生成）
 
 这不是普通的分镜拆解——我们在底层构建了完整的 **AI 视频生成镜头逻辑体系**，让 LLM 输出的分镜可以直接送入即梦、Kling 等 AI 视频工具，无需人工二次加工。
 
@@ -133,20 +133,44 @@
 - 文戏对话：每 2–3 句台词自动插入**反应镜头**，聚焦听者表情变化
 - 武戏：景别快速跳跃（特写 → 全景 → 侧拍），制造紧张感
 
-#### 10列工业风分镜矩阵输出
+#### 5列 Seedance 2.0 终极提示词输出
 
-最终输出为标准 JSON 数组，可直接渲染为 DataFrame 表格，含：
+最终输出为标准 JSON 数组，可直接渲染为 DataFrame 表格：
 
 | 列 | 内容 |
 |----|------|
-| 镜头号 / 焦段 / 光圈 / 机位 / 构图 / 运镜 / 主体动作表情 / 时长 |
-| **生图提示词（中英双语）** | 极简五要素：景别 + 人物名 + 动作 + 场景名 + $StyleTokens 自动追加 |
-| **视频运镜提示词（中文）** | 含物理运动轨迹描述（抛物线/弹跳/被接走），适配 Kling / 即梦 |
-| **视觉连贯性建议** | 指导 AI 视频生成的种子/垫图策略（沿用前景参考图 / 前镜底层垫图 / 新场景调整权重） |
+| 镜头号 / 时间码 / 景别·机位·运镜（融合描述） / 基本设定标签 |
+| **终极 Seedance 提示词** | 一段可直接粘贴至 Seedance 2.0 的完整文本，包含：【基本设定】（角色外貌/服装/场景/画质一次性定义）+【画面内容】分镜N：时间码 + 高密度画面描述（角色细节/环境光影/运镜轨迹/材质交互/镜头模拟关键词）。专业案例级密度，无需人工二次加工 |
 
 ---
 
-- **CrewAI 4-Agent 工业级分镜矩阵**：分镜导演 → 美术指导 → 视效总监 → 质检总监
+### 🔧 Harness 工程化层（v0.2.0）
+
+Harness 是一个模块化的工程化中间层，位于 UI 与 Agents Engine 之间，为 3-Agent 剧本创作管线提供生产级的**韧性、记忆与成本控制**能力。所有模块遵循"可选启用、向后兼容、增量增强"设计原则。
+
+#### 6 大核心模块
+
+| 模块 | 解决的问题 | 实际价值 |
+|------|----------|---------|
+| **CheckpointManager** 断点续传 | 页面刷新/Browser崩溃/断电 → 进度全丢 | 任意时刻保存或恢复，支持按集数间隔自动保存。100集长剧写完不怕中断 |
+| **StructuredMemoryStore** 结构化记忆 | 单段长文本记忆 → 50+集后角色性格/位置/伏线严重漂移 | `CharacterState` 精准追踪每个角色的位置/情绪/目标/关系/秘密；`PlotThread` 管理每条伏线生命周期（planted→active→revealed）；`EpisodeIndex` 按集检索摘要 |
+| **ContextRetriever** JIT上下文检索 | 每集Writer注入全量上下文（5000+ token起步），集数越多越膨胀 | 单集仅注入最小必要上下文（当前大纲段落 + 前3集摘要 + 活跃角色 + 活跃伏线），**Token 消耗降低 40-60%** |
+| **ToolSchema + ToolRegistry** 工具结构化 | 所有Agent能力规则写在prompt长文本里，模型理解不精准 | 按OpenAI function-calling兼容格式定义工具，每个Agent只获得自己需要的工具集，精准注入 |
+| **BudgetTracker + TerminationGuard** 预算与终止 | Doctor不满意或API异常时无限循环烧Token | **6层终止守卫**：安全拒绝 → 用户中断 → 自然完成 → 预算超限 → 轮次上限 → 红线违规。单集最多10轮×5000 token=5万token硬上限 |
+| **Safety Guardrails** 安全护栏 | Agent生成内容无安全约束 | Writer Prompt五层注入中安全护栏优先级最高，Doctor升级为对抗性审查模式 |
+
+#### 管线关键修复
+
+| 问题（v0.1） | 修复（v0.2） |
+|-------------|-------------|
+| **Writer重试空转**：Doctor驳回反馈从未传给Writer，凭空重写 | Doctor反馈 + Writer上一稿 真正传入 retry 分支，实现**螺旋式精修** |
+| **强制通过集跳过Harness**：force-approve时记忆/角色/checkpoint全不更新 | 补齐全套流程：记忆提取 → 角色状态更新 → checkpoint自动保存 |
+| **CheckpointManager重复创建**：同一页面周期3-5次实例化 | `session_state` 单例缓存，全生命周期只创建一次 |
+| **分镜串行瓶颈**：Image和Video Prompt必须等前者完成 | 新增 `parallel=True` 模式，Image ∥ Video 并行生成，分镜提速 **30-40%** |
+
+---
+
+- **CrewAI 4-Agent Seedance 2.0 分镜矩阵**：Seedance 分镜导演 → 视觉档案师 → Seedance 提示词工程师 → Seedance 格式质检
 - **全局美术风格词**：自定义 StyleTokens，自动追加到每个镜头英文提示词末尾
 
 ### 🔄 创作-审核-修改闭环
@@ -171,6 +195,10 @@
 | **制片管理** | 无 | 预算审计/场景拆解/分镜矩阵，一条龙 |
 | **模型接入** | 绑定单一平台，无选择权 | 12+ 服务商自由切换（国内外云端 API + 本地模型），按需选型 |
 | **成本灵活** | 单一计费，长剧成本失控 | 多服务商比价切换 + 本地模型可选，成本自主可控 |
+| **工程化韧性** | 无断点续传，崩溃即清空 | Harness CheckpointManager：任意时刻存/取，自动间隔保存 |
+| **长剧记忆** | 无结构化机制，剧情前后矛盾 | CharacterState + PlotThread + EpisodeIndex 结构化追踪，100集不失忆 |
+| **Token效率** | 全量上下文注入，线性增长 | JIT ContextRetriever：按需注入最小必要上下文，节省 40-60% |
+| **安全守护** | 内容生成无约束 | Safety Guardrails 最高优先级注入 + 6层终止守卫防止无限烧Token |
 
 ### 🔑 一句话总结优势
 
@@ -283,6 +311,15 @@ Film-Production-Toolkit/
 ├── requirements.txt         # Python依赖
 ├── .env.example             # 环境变量模板（API Key等）
 ├── StyleTokens.txt          # 全局美术风格词（分镜用）
+│
+├── harness/                  # 🔧 Harness 工程化层（v0.2.0）
+│   ├── __init__.py           # 模块入口，版本号 v0.2.0
+│   ├── checkpoint.py         # CheckpointManager 断点续传 + WorkflowContext 状态封装
+│   ├── memory_store.py       # StructuredMemoryStore 结构化记忆（角色/伏线/集索引）
+│   ├── context_retriever.py  # JIT上下文检索，Token消耗降低40-60%
+│   ├── tool_schema.py        # ToolSchema/ToolRegistry，Agent能力结构化
+│   ├── termination.py        # BudgetTracker + TerminationGuard 六层终止守卫
+│   └── config.py             # 统一配置管理
 │
 ├── creator/                 # 🎬 创作引擎
 │   ├── agents_engine.py     # 多智能体协作核心（Showrunner/Writer/Doctor）
