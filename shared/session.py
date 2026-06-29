@@ -71,6 +71,14 @@ def init_creator_state():
     if f"{prefix}logs" not in st.session_state:
         st.session_state[f"{prefix}logs"] = []
 
+    # ── 剧本改编工作流 ──
+    if f"{prefix}rewrite_source_text" not in st.session_state:
+        st.session_state[f"{prefix}rewrite_source_text"] = ""   # 原始上传剧本内容
+    if f"{prefix}rewrite_result" not in st.session_state:
+        st.session_state[f"{prefix}rewrite_result"] = ""        # 改编结果
+    if f"{prefix}rewrite_running" not in st.session_state:
+        st.session_state[f"{prefix}rewrite_running"] = False    # 是否正在改编中
+
 
 # =============================================================================
 # 制片流 Session State（加 production_ 前缀）

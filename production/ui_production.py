@@ -1053,9 +1053,9 @@ def _render_scene_result(global_scenes):
 # =============================================================================
 
 def render_storyboard(uploaded_file, style_tokens_input=""):
-    """CrewAI 4-Agent 分镜工作台完整UI"""
-    st.markdown("## 🎥 分镜工作台（CrewAI 4-Agent）")
-    st.caption("分镜导演 → 美术指导 → 视效总监 → 质检总监 | 工业级分镜矩阵")
+    """CrewAI 4-Agent 分镜工作台 v2.0 — Seedance 2.0 专业分镜格式"""
+    st.markdown("## 🎥 分镜工作台（Seedance 2.0 专业分镜 v2.0）")
+    st.caption("Seedance 分镜导演 → 视觉档案师 → Seedance 提示词工程师 → 格式质检 | 终极提示词直接可用")
 
     # 检测 CrewAI 可用性
     try:
@@ -1085,7 +1085,7 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
 
     st.success(f"✅ 已加载剧本，共 {len(script_content)} 字符")
 
-    if st.button("🚀 启动分镜工作流（4-Agent串行）", type="primary", use_container_width=True):
+    if st.button("🚀 启动 Seedance 2.0 分镜工作流（4-Agent串行）", type="primary", use_container_width=True):
         provider, client, model_name, kwargs = _get_production_llm()
 
         if "Ollama" in provider:
@@ -1106,13 +1106,13 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
 
         # 第二步：CrewAI 4-Agent 工作流
         chunks = split_script_smart(script_content)
-        st.success(f"第二步：启动 CrewAI 多智能体工作流，对 {len(chunks)} 个剧本切块进行分镜 + 质检...")
+        st.success(f"第二步：启动 Seedance 2.0 多智能体工作流，对 {len(chunks)} 个剧本切块进行专业分镜...")
 
         chars_str = json.dumps(global_chars, ensure_ascii=False) if global_chars else ""
         global_shots = []
         shot_num = 1
 
-        with st.spinner("🤖 CrewAI 工作流执行中（4-Agent 串行：分镜导演 → 美术指导 → 视效总监 → 质检总监）..."):
+        with st.spinner("🤖 Seedance 2.0 工作流执行中（分镜导演 → 视觉档案师 → 提示词工程师 → 格式质检）..."):
             for i, chunk in enumerate(chunks):
                 status_placeholder = st.empty()
                 status_placeholder.info(f"  正在处理第 {i+1}/{len(chunks)} 个切块...")
@@ -1133,47 +1133,55 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
                     st.warning(f"⚠️ 第 {i+1} 块处理异常：{crew_err}")
                 status_placeholder.info(f"  第 {i+1}/{len(chunks)} 块完成 ✓")
 
-        # 第三步：渲染工业级分镜矩阵
+        # 第三步：渲染 Seedance 2.0 专业分镜矩阵
         if global_shots:
-            st.markdown(f"### 🎥 工业级分镜矩阵（总计 {len(global_shots)} 镜）")
-            st.caption("📌 字段：焦段 / 光圈 / 机位（5要素）/ 构图 / 运镜 / 主体动作表情（台词嵌入）/ 限制 / 视觉连贯性建议 / 终极视频提示词")
+            st.markdown(f"### 🎥 Seedance 2.0 分镜矩阵（总计 {len(global_shots)} 镜）")
+            st.caption("📌 每镜一行「终极Seedance提示词」—— 直接复制粘贴到 Seedance 2.0 即可使用")
 
             cols_order = ["镜头号"] + [c for c in global_shots[0].keys() if c != "镜头号"]
             df_shots = pd.DataFrame(global_shots)[cols_order]
 
-            # 自动拼接终极视频提示词
-            def build_prompt(row):
-                style = style_tokens_input if style_tokens_input.strip() else "电影级质感, 8K分辨率, 极致写实"
-                limit = f"\n限制：{row.get('限制')}" if row.get('限制') and row.get('限制') != "—" else ""
-                return f"【视觉基调】\n{style}\n\n【镜头语言】\n{row.get('焦段', '')}，{row.get('光圈', '')}。{row.get('机位', '')} {row.get('构图', '')}。{row.get('运镜', '')}\n\n【画面内容】\n{row.get('主体动作表情', '')}{limit}"
+            # v2.0: 终极Seedance提示词已由QA Agent直接输出，无需二次拼接
+            # 如果旧版JSON（11列）意外传入，做兼容降级处理
+            if "终极Seedance提示词" not in df_shots.columns and "视频描述" in df_shots.columns:
+                df_shots["终极Seedance提示词"] = df_shots["视频描述"]
+                if "时间码" not in df_shots.columns:
+                    df_shots.insert(1, "时间码", "")
+                if "景别机位运镜" not in df_shots.columns:
+                    df_shots["景别机位运镜"] = df_shots.apply(
+                        lambda r: f"{r.get('焦段','')}, {r.get('运镜','')}", axis=1
+                    )
+                if "基本设定标签" not in df_shots.columns:
+                    df_shots["基本设定标签"] = "兼容模式"
 
-            df_shots["终极视频提示词"] = df_shots.apply(build_prompt, axis=1)
+            # 确保新格式列存在
+            for required_col in ["时间码", "景别机位运镜", "终极Seedance提示词", "基本设定标签"]:
+                if required_col not in df_shots.columns:
+                    df_shots[required_col] = ""
+
+            display_cols = ["镜头号", "时间码", "景别机位运镜", "基本设定标签", "终极Seedance提示词"]
+            df_display = df_shots[[c for c in display_cols if c in df_shots.columns]]
 
             st.data_editor(
-                df_shots,
+                df_display,
                 num_rows="dynamic",
                 use_container_width=True,
                 column_config={
                     "镜头号": st.column_config.NumberColumn(width="small", format="%d"),
-                    "焦段": st.column_config.TextColumn(width="small"),
-                    "光圈": st.column_config.TextColumn(width="small"),
-                    "机位": st.column_config.TextColumn(width="large"),
-                    "构图": st.column_config.TextColumn(width="medium"),
-                    "运镜": st.column_config.TextColumn(width="medium"),
-                    "主体动作表情": st.column_config.TextColumn(width="large"),
-                    "限制": st.column_config.TextColumn(width="medium"),
-                    "视觉连贯性建议": st.column_config.TextColumn(width="medium"),
-                    "终极视频提示词": st.column_config.TextColumn(width="large"),
+                    "时间码": st.column_config.TextColumn(width="small"),
+                    "景别机位运镜": st.column_config.TextColumn(width="medium"),
+                    "基本设定标签": st.column_config.TextColumn(width="small"),
+                    "终极Seedance提示词": st.column_config.TextColumn(width="large"),
                 }
             )
 
-            # Excel下载
+            # Excel下载 — v2.0 格式
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                df_shots.to_excel(writer, index=False, sheet_name="分镜矩阵")
+                df_display.to_excel(writer, index=False, sheet_name="Seedance2.0分镜")
             st.download_button(
-                "📥 下载分镜矩阵 (Excel)", data=out.getvalue(),
-                file_name="分镜矩阵_工业级.xlsx"
+                "📥 下载 Seedance 分镜矩阵 (Excel)", data=out.getvalue(),
+                file_name="分镜矩阵_Seedance2.0.xlsx"
             )
         else:
             st.warning("⚠️ CrewAI 工作流未返回有效分镜数据")

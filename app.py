@@ -208,24 +208,96 @@ with st.sidebar:
         uploaded_file = st.file_uploader("导入文本文档 (.docx / .txt / .md)", type=["docx", "txt", "md"],
                                           key="production_file_upload")
 
-        # 美术风格词（分镜工作流需要）
+        # 视觉基调选择（分镜工作台专属）
         if active_tab == "🎥 分镜工作台":
             st.markdown("---")
-            st.markdown("### 🎨 全局美术风格")
-            style_tokens_file = os.path.join(os.path.dirname(__file__), "StyleTokens.txt")
-            default_style = ""
-            try:
-                with open(style_tokens_file, "r", encoding="utf-8") as f:
-                    default_style = f.read().strip()
-            except Exception:
-                pass
-            style_tokens_input = st.text_area(
-                "StyleTokens（AI 生图提示词专用后缀）",
-                value=default_style,
-                placeholder="例如：AI漫剧, 古装, 写实, cinematic lighting, 8k, ...",
-                height=100,
-                help="会追加到每个镜头的英文生图提示词末尾"
+            st.markdown("### 🎨 视觉基调")
+            st.caption("选择视觉参考方向，LLM 会结合剧本内容自动确定拍摄风格")
+
+            # ── 12 种视觉基调定义 ──
+            # 格式：{ "显示名": { "desc": "简介", "tokens": "英文关键词（生图提示词）" } }
+            _VISUAL_TONES = {
+                "🌑 极暗写实": {
+                    "desc": "强对比度，深暗调，电影感光影，赤贫底层题材",
+                    "tokens": "ultra-dark tone, deep shadow, high contrast, cinematic lighting, desaturated, gritty realism, 8k"
+                },
+                "☀️ 明快都市": {
+                    "desc": "清亮自然光，现代都市感，干净构图，轻喜剧",
+                    "tokens": "bright natural light, modern urban, clean composition, warm tones, contemporary style, 8k"
+                },
+                "🔥 古装史诗": {
+                    "desc": "工笔重彩，古铜色调，宏大格局，战争与权谋",
+                    "tokens": "ancient Chinese costume drama, bronze tone, epic scale, ink wash painting style, cinematic, 8k"
+                },
+                "💜 赛博朋克": {
+                    "desc": "霓虹反光，蓝紫色调，高科技低生活，失控感",
+                    "tokens": "cyberpunk, neon lights, blue-purple tones, rain-slicked streets, high-tech dystopia, cinematic, 8k"
+                },
+                "🌸 甜虐偶像": {
+                    "desc": "柔焦滤镜，粉紫暖色，明亮背光，情感张力",
+                    "tokens": "soft focus, pink-lavender palette, backlit glow, idol drama style, romantic tension, 8k"
+                },
+                "🧊 悬疑冷峻": {
+                    "desc": "冷蓝调，平光硬打，极简构图，心理惊悚",
+                    "tokens": "cold blue tone, flat hard light, minimalist composition, psychological thriller, desaturated, 8k"
+                },
+                "😂 诙谐荒诞": {
+                    "desc": "饱和撞色，夸张景深，喜剧节奏，荒诞幽默",
+                    "tokens": "saturated colors, comic composition, exaggerated depth of field, slapstick humor, warm playful tone, 8k"
+                },
+                "🌿 田园治愈": {
+                    "desc": "柔和绿意，散射自然光，低饱和暖白，慢生活",
+                    "tokens": "pastoral healing, soft green foliage, diffused sunlight, low saturation warm white, slow life aesthetic, 8k"
+                },
+                "⚔️ 玄幻仙侠": {
+                    "desc": "粒子光效，云雾仙境，东方奇幻，神话质感",
+                    "tokens": "xianxia fantasy, particle light effects, misty celestial realm, oriental mythology, ethereal glow, 8k"
+                },
+                "🕵️ 黑色电影": {
+                    "desc": "强阴影，威尼斯百叶窗光，复古犯罪，侦探氛围",
+                    "tokens": "film noir, venetian blind shadows, vintage crime, dark atmosphere, high contrast black and white-inspired, 8k"
+                },
+                "🎌 日系漫改": {
+                    "desc": "扁平色块，二次元转译，鲜明轮廓，动漫质感",
+                    "tokens": "anime adaptation style, flat color blocks, bold outlines, 2D-to-3D hybrid, manga-inspired, vivid tones, 8k"
+                },
+                "🌊 末世废土": {
+                    "desc": "尘土飞扬，橘黄天空，破败建筑，后启示录感",
+                    "tokens": "post-apocalyptic wasteland, dusty orange sky, ruined cityscape, desolate atmosphere, survival drama, 8k"
+                },
+            }
+
+            # ── 多选（可选多个基调叠加） ──
+            selected_tones = st.multiselect(
+                "选择视觉基调（可多选叠加）",
+                options=list(_VISUAL_TONES.keys()),
+                default=st.session_state.get("storyboard_tones", []),
+                key="storyboard_tones_select",
+                help="未选择时 LLM 将完全根据剧本内容自动推断视觉风格"
             )
+            st.session_state["storyboard_tones"] = selected_tones
+
+            # 显示选中基调的描述
+            if selected_tones:
+                for tone in selected_tones:
+                    st.caption(f"**{tone}** — {_VISUAL_TONES[tone]['desc']}")
+
+            # 生成 style_tokens_input：合并所有选中基调的 tokens
+            if selected_tones:
+                merged_tokens = ", ".join(
+                    _VISUAL_TONES[t]["tokens"] for t in selected_tones
+                )
+                # 去重关键词（多个基调可能有共同的"8k"等）
+                seen = set()
+                unique_tokens = []
+                for tok in merged_tokens.split(", "):
+                    tok = tok.strip()
+                    if tok and tok.lower() not in seen:
+                        seen.add(tok.lower())
+                        unique_tokens.append(tok)
+                style_tokens_input = ", ".join(unique_tokens)
+            else:
+                style_tokens_input = ""  # 空字符串 → LLM 自动推断
     else:
         # 创作流专属：剧本格式选择
         st.markdown("## 🎬 剧本格式")

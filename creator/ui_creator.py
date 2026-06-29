@@ -30,6 +30,15 @@ from shared.llm_config import (
     SCRIPT_FORMATS, create_openai_client, get_default_model,
 )
 
+# Harness 工程化集成
+try:
+    from harness.checkpoint import CheckpointManager, WorkflowContext
+    from harness.config import HarnessConfig
+    from harness.memory_store import StructuredMemoryStore
+    _HARNESS_AVAILABLE = True
+except ImportError:
+    _HARNESS_AVAILABLE = False
+
 
 # 使用命名空间的快捷访问
 def _ss(key):
@@ -39,6 +48,107 @@ def _ss(key):
 def _set_ss(key, value):
     """快速设置 creator_ 前缀的 session_state"""
     st.session_state[f"creator_{key}"] = value
+
+
+# =============================================================================
+# Harness Checkpoint 工具函数
+# =============================================================================
+
+def _get_checkpoint_dir() -> str:
+    """获取 checkpoint 存储目录（项目相对路径）"""
+    import os
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), ".checkpoints")
+
+
+def _get_cm() -> CheckpointManager:
+    """获取 CheckpointManager 实例（session_state 缓存，避免重复创建）"""
+    cached = _ss("_harness_cm")
+    if cached is not None:
+        return cached
+    cp_dir = _get_checkpoint_dir()
+    cfg = HarnessConfig(checkpoint_dir=cp_dir)
+    cm = CheckpointManager(config=cfg)
+    _set_ss("_harness_cm", cm)
+    return cm
+
+
+def _auto_save_checkpoint(name: str = ""):
+    """自动保存当前创作流状态到 checkpoint"""
+    if not _HARNESS_AVAILABLE:
+        return
+    try:
+        cm = _get_cm()
+        ctx = cm.save_current(name=name, prefix="creator_")
+        if ctx and ctx.has_content:
+            pass  # 保存成功
+    except Exception:
+        pass  # 静默失败，不影响主流程
+
+
+def _has_checkpoints() -> bool:
+    """检查是否有可恢复的 checkpoint"""
+    if not _HARNESS_AVAILABLE:
+        return False
+    try:
+        cm = _get_cm()
+        cps = cm.list_checkpoints(workflow_type="creator")
+        return len(cps) > 0
+    except Exception:
+        return False
+
+
+def _get_latest_checkpoint() -> dict:
+    """获取最新 checkpoint 的摘要信息"""
+    if not _HARNESS_AVAILABLE:
+        return {}
+    try:
+        cm = _get_cm()
+        cps = cm.list_checkpoints(workflow_type="creator", limit=1)
+        if not cps:
+            return {}
+        ctx = cps[0]
+        from datetime import datetime
+        ts = ctx.timestamp
+        try:
+            readable_time = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except (OSError, ValueError, OverflowError):
+            readable_time = ""
+        return {
+            "checkpoint_id": ctx.checkpoint_id,
+            "name": ctx.name,
+            "current_episode": ctx.current_episode,
+            "total_episodes": ctx.total_episodes,
+            "timestamp": ts,
+            "readable_time": readable_time,
+        }
+    except Exception:
+        return {}
+
+
+def _restore_latest_checkpoint():
+    """恢复最新 checkpoint 到 session_state"""
+    if not _HARNESS_AVAILABLE:
+        return False
+    try:
+        cm = _get_cm()
+        cps = cm.list_checkpoints(workflow_type="creator", limit=1)
+        if not cps:
+            return False
+        ctx = cm.restore(cps[0].checkpoint_id, prefix="creator_")
+        return ctx is not None
+    except Exception:
+        return False
+
+
+def _delete_all_checkpoints():
+    """清理所有 checkpoint"""
+    if not _HARNESS_AVAILABLE:
+        return
+    try:
+        cm = _get_cm()
+        cm.delete_all(workflow_type="creator")
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -172,6 +282,39 @@ def _execute_scripts_thread(creative_idea, script_format, outline, total_episode
     creator_add_log("🚀 阶段二启动：批量生成剧本...", "system")
     creator_add_log(f"   集数：{total_episodes} 集", "info")
 
+    # Harness: 创建结构化记忆和断点管理器
+    harness_memory_store = None
+    harness_checkpoint_mgr = None
+    if _HARNESS_AVAILABLE:
+        try:
+            import hashlib
+            pid = hashlib.md5(creative_idea.encode()).hexdigest()[:12]
+            harness_memory_store = StructuredMemoryStore(
+                project_id=f"creator_{pid}",
+                config=HarnessConfig(checkpoint_dir=_get_checkpoint_dir()),
+            )
+            creator_add_log("🧠 Harness 结构化记忆已激活", "info")
+        except Exception:
+            pass
+        try:
+            harness_checkpoint_mgr = _get_cm()
+        except Exception:
+            pass
+
+    # Harness: 创建 ContextRetriever（JIT 上下文检索，降低 token 消耗）
+    harness_retriever = None
+    if _HARNESS_AVAILABLE and harness_memory_store is not None:
+        try:
+            from harness.context_retriever import ContextRetriever
+            harness_retriever = ContextRetriever(
+                outline=outline,
+                memory_store=harness_memory_store,
+                total_episodes=total_episodes,
+                recent_count=3,
+            )
+        except Exception:
+            pass
+
     try:
         context = run_scripts_phase(
             client=create_openai_client(base_url, api_key),
@@ -181,19 +324,39 @@ def _execute_scripts_thread(creative_idea, script_format, outline, total_episode
             outline=outline,
             total_episodes=total_episodes,
             log_callback=creator_add_log,
-            progress_callback=on_progress
+            progress_callback=on_progress,
+            memory_store=harness_memory_store,
+            checkpoint_manager=harness_checkpoint_mgr,
+            context_retriever=harness_retriever,
         )
 
         _set_ss("script_content", context.script_content)
         _set_ss("memory_snapshot", context.memory_snapshot)
         creator_add_log("✅ 阶段二执行完成", "success")
 
+        # Harness: 持久化结构化记忆
+        if harness_memory_store is not None:
+            try:
+                harness_memory_store.save()
+                stats = harness_memory_store.stats
+                creator_add_log(
+                    f"📊 记忆统计：角色×{stats['characters']}，"
+                    f"伏线×{stats['plot_threads_total']}（活跃{stats['plot_threads_active']}），"
+                    f"索引×{stats['episodes_indexed']}",
+                    "info"
+                )
+            except Exception:
+                pass
+
     except Exception as e:
         creator_add_log(f"❌ 阶段二执行出错：{str(e)}", "error")
 
     finally:
         _set_ss("workflow_running", False)
-
+        # Harness: 阶段二完成后自动保存 checkpoint
+        if _ss("script_content"):
+            _auto_save_checkpoint(name=f"自动存档-创作完成(第{total_episodes}集)")
+    
 
 def _execute_outline_revision_thread(creative_idea, script_format, previous_outline, user_feedback, provider, base_url, api_key, model):
     """大纲定向修改"""
@@ -546,6 +709,1062 @@ def _clear_modification_state():
     st.session_state.cross_mode_modification_start_time = 0
     st.session_state.cross_mode_modification_error = ""
     st.session_state.cross_mode_show_bridge = False
+
+
+# =============================================================================
+# 剧本改编功能
+# =============================================================================
+
+# 情绪导向改编 Prompt（竖屏微短剧 / 短剧爽剧）
+_REWRITE_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
+
+## 核心原则（情绪导向 / 多巴胺爽剧）
+1. **痛点即钩子**：每集开头必须触发观众情绪痛点（被欺负/被看不起/反转打脸）
+2. **多巴胺节奏**：每 1-2 分钟一个爽点，节奏极速，不拖沓
+3. **情绪优先**：逻辑可以不严密，但情绪必须到位——爽感、甜感、虐感轮番上阵
+4. **台词冲击力**：短句、金句、对白要有记忆点，能截图传播
+5. **集末钩子**：每集结尾必须有悬念或反转，逼迫观众看下一集
+
+## 扩充时（增加集数）
+- 每个情绪高潮前增加铺垫集（被打压→绝地反击加长版）
+- 增加多个配角的欺负/刁难情节，拉长反转前的压抑感
+- 新增 sub-plot（感情线/职场线/家庭线）穿插
+
+## 压缩时（减少集数）
+- 保留核心反转和爽点，删除纯铺垫的过渡集
+- 合并多个小冲突为一个大冲突
+- 确保每集都有强情绪点，不出现"平淡集"
+
+## 输出格式
+请输出完整的改编后剧本，格式与原剧本保持一致。
+每集用"========================================"分隔，开头标注"第X集"。
+
+## ⚠️ 集数约束（最高优先级，绝对不可违反）
+{episode_constraint}
+"""
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 分块改编专用 System Prompt（不含全局集数约束，避免与每块指令冲突）
+# ═════════════════════════════════════════════════════════════════════════════
+_CHUNK_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
+
+## 核心原则（情绪导向 / 多巴胺爽剧）
+1. **痛点即钩子**：每集开头必须触发观众情绪痛点（被欺负/被看不起/反转打脸）
+2. **多巴胺节奏**：每 1-2 分钟一个爽点，节奏极速，不拖沓
+3. **情绪优先**：逻辑可以不严密，但情绪必须到位——爽感、甜感、虐感轮番上阵
+4. **台词冲击力**：短句、金句、对白要有记忆点，能截图传播
+5. **集末钩子**：每集结尾必须有悬念或反转，逼迫观众看下一集
+
+## 合并策略（压缩时减少集数）
+- **必须合并**：将相邻的铺垫集合并，保留核心情绪爆点
+- **合并公式**：N集原文 → M集目标 = 每 (N/M) 集原文合并为1集目标
+- **示例**：15集原文→10集目标：将第1+2集合并为新第1集，第3+4集合并为新第2集，第5集保留为新第3集...以此类推
+- **保留原则**：核心反转、爽点、钩子必须保留；纯过渡、重复冲突可删除或压缩
+- **禁止行为**：不得将每集原文简单复制为一集目标——必须真正合并内容
+
+## 拆分策略（扩充时增加集数）
+- 每个情绪高潮前增加铺垫集
+- 增加多个配角的欺负/刁难情节，拉长反转前的压抑感
+- 新增 sub-plot（感情线/职场线/家庭线）穿插
+
+## 输出格式
+每集用"========================================"分隔，开头标注"第X集"。
+你必须严格遵守用户消息中的【集数要求】，一集不多，一集不少。"""
+
+_CHUNK_STRUCTURE_PROMPT = """你是一位专业的影视编剧，擅长将剧本进行结构导向改编，精通好莱坞三幕式、Save the Cat节拍表与麦基价值观冲突理论。
+
+## 核心原则（结构导向）
+1. **三幕结构完整性**：建置（约25%）→ 对抗（约50%）→ 解决（约25%）比例清晰
+2. **人物弧光**：主角必须有内在成长或蜕变，Ghost/Lie/Flaw 三角清晰
+3. **逻辑自洽**：人物动机要充分，情节转折有因果关系
+4. **节拍把控**：重要节拍点（触发事件/第一幕结/中间点/第二幕结/高潮）位置准确
+5. **主题强化**：每场戏都服务于主题，删除游离于主题之外的剧情
+
+## 合并策略（压缩时减少集数）
+- **必须合并**：将功能相似的场景合并，用更经济的叙事推进情节
+- **合并公式**：N集原文 → M集目标 = 每 (N/M) 集原文合并为1集目标
+- **示例**：15集原文→10集目标：将第1+2集合并为新第1集，第3+4集合并为新第2集，第5集保留为新第3集...以此类推
+- **保留原则**：核心结构节拍点、标志性对白必须保留；重复场景、冗余对话可删除或压缩
+- **禁止行为**：不得将每集原文简单复制为一集目标——必须真正合并内容
+
+## 拆分策略（扩充时增加集数/篇幅）
+- 深化人物弧光，增加内心戏和人物关系张力
+- 增加支线剧情，丰富世界观和配角塑造
+- 扩展关键场景，增加对白层次和潜台词
+- 补充"静谧时刻"（All is Lost / Dark Night of the Soul）
+
+## 输出格式
+每集用"========================================"分隔，开头标注"第X集"。
+你必须严格遵守用户消息中的【集数要求】，一集不多，一集不少。"""
+
+# 结构导向改编 Prompt（中长剧 / 电影）
+_REWRITE_STRUCTURE_PROMPT = """你是一位专业的影视编剧，擅长将剧本进行结构导向改编，精通好莱坞三幕式、Save the Cat节拍表与麦基价值观冲突理论。
+
+## 核心原则（结构导向）
+1. **三幕结构完整性**：建置（约25%）→ 对抗（约50%）→ 解决（约25%）比例清晰
+2. **人物弧光**：主角必须有内在成长或蜕变，Ghost/Lie/Flaw 三角清晰
+3. **逻辑自洽**：人物动机要充分，情节转折有因果关系
+4. **节拍把控**：重要节拍点（触发事件/第一幕结/中间点/第二幕结/高潮）位置准确
+5. **主题强化**：每场戏都服务于主题，删除游离于主题之外的剧情
+
+## 扩充时（增加集数/篇幅）
+- 深化人物弧光，增加内心戏和人物关系张力
+- 增加支线剧情，丰富世界观和配角塑造
+- 扩展关键场景，增加对白层次和潜台词
+- 补充"静谧时刻"（All is Lost / Dark Night of the Soul）
+
+## 压缩时（减少集数/篇幅）
+- 保留核心结构节拍点，删除重复或冗余场景
+- 合并功能相似的场景，用更经济的叙事手段推进情节
+- 确保主题信息不丢失，保留标志性对白
+
+## 输出格式
+请输出完整的改编后剧本，格式与原剧本保持一致。
+每集用"========================================"分隔，开头标注"第X集"（如为电影则按场次）。
+
+## ⚠️ 集数约束（最高优先级，绝对不可违反）
+{episode_constraint}
+"""
+
+
+def _parse_episode_numbers(instruction: str, source_text: str) -> tuple[int, int]:
+    """
+    从改编指令和原始剧本中解析：原始集数 src_ep、目标集数 tgt_ep。
+    返回 (src_ep, tgt_ep)，无法解析时返回 (0, 0)。
+    """
+    # 匹配"X集改成Y集"、"X集压缩为Y集"、"X集扩充到Y集"等各种表述
+    # 注意：正则顺序很重要——更具体的模式放前面
+    patterns = [
+        # 标准格式：60集改成/压缩/扩充/精简/缩减/调整 成/为/到/至 40集
+        r'(\d+)\s*集\s*(?:改(?:成|编|写|为)|压缩(?:为|到|成|至)|扩充(?:为|到|成|至)|精简(?:为|到|成|至)|缩减(?:为|到|成|至)|调整(?:为|到|成|至))\s*(\d+)\s*集',
+        # 从X集改/变/到/压缩/扩充 为/成/到/至 Y集
+        r'从\s*(\d+)\s*集\s*(?:改|变|到|压缩|扩充|缩减|精简|调整)\s*(?:为|成|到|至)?\s*(\d+)\s*集',
+        # X集 →/-/-> Y集
+        r'(\d+)\s*集\s*(?:→|-|->)\s*(\d+)\s*集',
+        # 目标: Y集 原始: X集
+        r'目标\s*[:：]?\s*(\d+)\s*集.*?原(?:始|始剧本)?\s*[:：]?\s*(\d+)\s*集',
+        # 原始: X集 目标: Y集
+        r'原(?:始|剧本)?\s*[:：]?\s*(\d+)\s*集.*?目标\s*[:：]?\s*(\d+)\s*集',
+        # 宽泛匹配：把/将X集剧本...到/为/成Y集
+        r'(?:把|将|把这个|将这个|把该|将该|把原有|将原有)\s*(\d+)\s*集.*?(?:扩充|压缩|改编|改成|改写|精简|缩减|调整|扩展|延伸|拉长).*?(?:到|为|成|至)\s*(\d+)\s*集',
+        # 宽泛匹配：...X集...到/为/成Y集
+        r'(?:扩充|压缩|改编|改成|改写|精简|缩减|调整|扩展|延伸|拉长|改).*?(\d+)\s*集.*?(?:到|为|成|至)\s*(\d+)\s*集',
+        # 数字范围：X集 - Y集、X集~Y集
+        r'(\d+)\s*集\s*(?:[-~～])\s*(\d+)\s*集',
+    ]
+    for p in patterns:
+        m = re.search(p, instruction)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            # 智能判断哪个是原始哪个是目标：
+            # 如果 a > b，大概率是压缩（a是原始，b是目标）
+            # 如果 a < b，大概率是扩充（a是原始，b是目标）
+            # 但用户也可能说"目标40集，原始60集"，这时需要看pattern
+            return (a, b)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 兜底逻辑：正则没匹配到，从指令和正文中提取数字
+    # ═══════════════════════════════════════════════════════════════
+    single = re.findall(r'(\d+)\s*集', instruction)
+
+    # 从剧本正文统计集数（最大集号）
+    ep_nums = re.findall(r'第\s*(\d+)\s*集', source_text)
+    src_ep = max((int(x) for x in ep_nums), default=0) if ep_nums else 0
+
+    if not single:
+        # 指令中完全没有"X集"格式
+        return (src_ep, 0)
+
+    if len(single) >= 2:
+        # 指令中有两个及以上数字，取较大的当原始、较小的当目标
+        # 原因："60集缩减到40集"里，60和40都会匹配到
+        # 原始集数通常 >= 目标集数（压缩场景更常见）
+        nums = sorted([int(x) for x in single])
+        # 如果正文统计的src_ep和其中一个接近，就用另一个当目标
+        if src_ep > 0:
+            # 找离 src_ep 最近的数字当原始，另一个当目标
+            closest = min(nums, key=lambda x: abs(x - src_ep))
+            tgt = [n for n in nums if n != closest]
+            if tgt:
+                return (closest, tgt[0])
+        # 默认：较大的当原始，较小的当目标
+        return (nums[-1], nums[0])
+    else:
+        # 只有一个数字：把它当目标集数
+        tgt_from_instruction = int(single[0])
+        return (src_ep, tgt_from_instruction)
+
+
+def _build_episode_constraint(src_ep: int, tgt_ep: int, instruction: str) -> str:
+    """根据解析到的集数生成强约束文字。"""
+    if tgt_ep > 0 and src_ep > 0:
+        action = "压缩" if tgt_ep < src_ep else "扩充"
+        return (
+            f"- 原始剧本共 **{src_ep} 集**，目标改编为 **{tgt_ep} 集**（{action}）\n"
+            f"- 你**必须**输出恰好 **{tgt_ep} 集**，不得多也不得少\n"
+            f"- 从第1集写到第{tgt_ep}集，每集都要有完整的场景和对白\n"
+            f"- 如果内容被截断导致写不完，必须在截断前输出已完成的集数，并在末尾注明'已完成前X集，后续待续'\n"
+            f"- 绝对禁止：输出少于 {tgt_ep} 集后就停止，且不做任何说明"
+        )
+    elif tgt_ep > 0:
+        return (
+            f"- 目标集数：**{tgt_ep} 集**（绝对约束）\n"
+            f"- 你**必须**输出恰好 **{tgt_ep} 集**，从第1集写到第{tgt_ep}集\n"
+            f"- 每集都要有完整的场景和对白，不得只写标题或摘要"
+        )
+    else:
+        # 无法解析集数，返回通用约束
+        return (
+            f"- 严格按照改编指令执行集数要求，不得随意增减集数\n"
+            f"- 必须输出指令中明确要求的目标集数，不得提前结束"
+        )
+
+
+# =============================================================================
+# 分块改编流水线核心函数
+# =============================================================================
+
+def _split_source_by_episodes(source_text: str) -> list[dict]:
+    """
+    按集数标记切分原始剧本，返回 [{ep_start, ep_end, content}, ...]
+    无集数标记时按段落均分。
+    """
+    # 尝试按 "第X集" 切分
+    sep = "========================================"
+    # 优先用分隔线切分
+    if sep in source_text:
+        parts = source_text.split(sep)
+        blocks = []
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            # 提取本段集号
+            ep_nums = re.findall(r'第\s*(\d+)\s*集', part)
+            ep_start = int(ep_nums[0]) if ep_nums else 0
+            ep_end = int(ep_nums[-1]) if ep_nums else 0
+            blocks.append({"ep_start": ep_start, "ep_end": ep_end, "content": part})
+        if blocks:
+            return blocks
+
+    # 退而求其次：按 "第X集" 标记切分
+    pattern = r'(第\s*\d+\s*集)'
+    splits = re.split(pattern, source_text)
+    if len(splits) > 2:
+        blocks = []
+        i = 1  # splits[0] 是分隔前的文本
+        while i < len(splits):
+            ep_label = splits[i].strip()
+            ep_nums = re.findall(r'(\d+)', ep_label)
+            ep_num = int(ep_nums[0]) if ep_nums else 0
+            # 收集内容直到下一个标记
+            content_parts = []
+            while i + 1 < len(splits):
+                next_part = splits[i + 1]
+                # 检查下一部分是否包含新的集标记
+                if re.match(r'第\s*\d+\s*集', next_part.strip()):
+                    break
+                content_parts.append(next_part)
+                i += 1
+            content = ep_label + "".join(content_parts)
+            blocks.append({"ep_start": ep_num, "ep_end": ep_num, "content": content.strip()})
+            i += 1
+        if blocks:
+            return blocks
+
+    # 没有集数标记：按段落均分为若干块
+    paragraphs = [p for p in source_text.split('\n') if p.strip()]
+    if not paragraphs:
+        return [{"ep_start": 0, "ep_end": 0, "content": source_text}]
+
+    # 每15个段落一块（兜底）
+    chunk_size = max(5, len(paragraphs) // max(1, len(paragraphs) // 15))
+    blocks = []
+    for i in range(0, len(paragraphs), chunk_size):
+        chunk = "\n".join(paragraphs[i:i + chunk_size])
+        blocks.append({"ep_start": 0, "ep_end": 0, "content": chunk})
+    return blocks
+
+
+def _generate_story_summary(client, model, provider, source_text: str,
+                            rewrite_style: str, rewrite_instruction: str,
+                            extra: dict) -> str:
+    """
+    Phase 0：分析原始剧本，生成结构摘要（人物/情节线/设定/关键伏笔）。
+    此摘要将作为后续每块改写的"全局记忆"传入。
+    """
+    style_desc = "情绪导向（多巴胺爽剧）" if rewrite_style == "emotion" else "结构导向（三幕式）"
+    summary_prompt = f"""你是一位资深剧本分析师。请对以下原始剧本进行全面分析，输出一份结构化摘要。
+
+## 分析要求
+1. **主要人物**：列出所有重要角色，包括姓名、身份、性格特征、关键关系
+2. **核心情节线**：列出主线和所有重要支线的起承转合
+3. **世界观/设定**：故事背景、核心设定、特殊规则
+4. **关键伏笔与悬念**：已埋下的伏笔和未解决的悬念
+5. **情感弧线**：主角及核心配角的情感变化轨迹
+6. **改编方向提示**：根据改编指令「{rewrite_instruction}」，指出哪些内容必须保留、哪些可以删减/合并/扩充
+
+## 输出格式
+用结构化列表，每个条目不超过2行，力求精简但信息完整。"""
+
+    user_msg = f"{summary_prompt}\n\n---\n\n## 原始剧本\n\n{source_text}"
+
+    # 非流式调用——摘要不需要流式展示
+    is_ollama = "Ollama" in provider
+    kwargs = dict(
+        model=model,
+        messages=[
+            {"role": "system", "content": "你是专业的剧本分析师，输出精简准确的结构化摘要。"},
+            {"role": "user", "content": user_msg},
+        ],
+        temperature=0.3,
+        stream=False,
+    )
+    if is_ollama:
+        kwargs["extra_body"] = {"options": {"num_ctx": 131072, "num_predict": 8192}}
+    else:
+        kwargs["max_tokens"] = 8192
+
+    resp = client.chat.completions.create(**kwargs)
+    return resp.choices[0].message.content or ""
+
+
+def _rewrite_single_chunk(client, model, provider, style_prompt: str,
+                          chunk_content: str, story_summary: str,
+                          rewrite_instruction: str,
+                          src_ep_start: int, src_ep_end: int,
+                          tgt_ep_start: int, tgt_ep_end: int,
+                          prev_tail: str, extra: dict,
+                          status_container, progress_text) -> str:
+    """
+    单块改写。流式输出，实时更新UI。
+
+    参数：
+      chunk_content  : 本块原始剧本片段
+      story_summary  : Phase 0 生成的全局摘要
+      rewrite_instruction : 用户改编指令
+      src_ep_start/end : 本块包含的原始集数范围
+      tgt_ep_start/end : 本块应输出的目标集数范围
+      prev_tail      : 上一块改写结果的末尾（用于衔接）
+      extra          : LLM调用参数（max_tokens/num_predict）
+      status_container / progress_text : UI更新用
+
+    返回：本块改写后的完整文本（已校验/截断至目标集数）
+    """
+    src_count = src_ep_end - src_ep_start + 1
+    tgt_count = tgt_ep_end - tgt_ep_start + 1
+
+    # ═══════════════════════════════════════════════════════════════
+    # 生成显式合并映射指导（告诉模型具体怎么合并）
+    # ═══════════════════════════════════════════════════════════════
+    ratio = src_count / tgt_count if tgt_count > 0 else 1.0
+    if ratio > 1.0:
+        # 压缩：生成合并建议
+        merge_lines = []
+        src_idx = src_ep_start
+        for t_i in range(tgt_count):
+            # 每集目标分配 ratio 集原文（向上取整/向下取整交替）
+            base = src_count // tgt_count
+            rem = src_count % tgt_count
+            take = base + (1 if t_i < rem else 0)
+            end_src = min(src_idx + take - 1, src_ep_end)
+            if src_idx == end_src:
+                merge_lines.append(f"  新第{tgt_ep_start + t_i}集 = 原文第{src_idx}集（单独保留）")
+            else:
+                merge_lines.append(f"  新第{tgt_ep_start + t_i}集 = 原文第{src_idx}-{end_src}集（合并）")
+            src_idx = end_src + 1
+        merge_guide = "\n".join(merge_lines)
+        action_desc = f"压缩：{src_count}集原文 → {tgt_count}集目标（压缩比 {ratio:.1f}:1）"
+    elif ratio < 1.0:
+        # 扩充
+        action_desc = f"扩充：{src_count}集原文 → {tgt_count}集目标（扩充比 1:{1/ratio:.1f}）"
+        merge_guide = f"  将每集原文拆分为约 {tgt_count/src_count:.0f} 集，增加铺垫和细节。"
+    else:
+        action_desc = f"等比改写：{src_count}集原文 → {tgt_count}集目标（1:1）"
+        merge_guide = "  逐集改写，保持集数不变。"
+
+    # 构造上下文
+    context_parts = []
+    if story_summary:
+        context_parts.append(f"## 全剧摘要（全局参考）\n{story_summary}")
+    if prev_tail:
+        context_parts.append(
+            f"## 前情衔接（上一段改写结果的末尾，必须与此衔接）\n{prev_tail}"
+        )
+    context_block = "\n\n".join(context_parts)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 重组 User Msg：集数要求放在最前面、最醒目
+    # ═══════════════════════════════════════════════════════════════
+    user_msg = f"""【🚨 集数要求 — 最高优先级，绝对不可违反】
+
+{action_desc}
+你必须输出恰好 {tgt_count} 集，从第 {tgt_ep_start} 集到第 {tgt_ep_end} 集。
+一集不多，一集不少。每集必须有完整的场景和对白。
+
+【合并/拆分映射参考】（必须按此执行）
+{merge_guide}
+
+⚠️ 警告：如果你简单复制原文集数而不合并，输出会超出要求并被截断丢弃。
+
+---
+
+## 改编指令
+{rewrite_instruction}
+
+---
+
+{context_block}
+
+---
+
+## 本段原始剧本（{src_count}集，参考用）
+
+{chunk_content}
+
+---
+
+## 输出要求
+1. 输出第 {tgt_ep_start} 集到第 {tgt_ep_end} 集，共 {tgt_count} 集
+2. 如果这是第一段（第{tgt_ep_start}集起），开头必须与全剧开头一致
+3. 如果不是第一段，开头必须与前情衔接自然，不得突兀跳转
+4. 每集用"========================================"分隔，开头标注"第X集"
+5. 每集必须有完整的场景和对白，不得只写标题或摘要"""
+
+    is_ollama = "Ollama" in provider
+    # 每块改写的 max_tokens = 集数 × 2500，最低 8192，最高 32768
+    chunk_max_tokens = max(8192, min(32768, tgt_count * 2500))
+    if is_ollama:
+        chunk_kwargs = dict(
+            model=model,
+            messages=[
+                {"role": "system", "content": style_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            stream=True,
+            temperature=0.8,
+            extra_body={"options": {"num_ctx": 131072, "num_predict": chunk_max_tokens}},
+        )
+    else:
+        chunk_kwargs = dict(
+            model=model,
+            messages=[
+                {"role": "system", "content": style_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            stream=True,
+            temperature=0.8,
+            max_tokens=chunk_max_tokens,
+        )
+
+    import time as _time
+    chunk_result = ""
+    start = _time.time()
+
+    try:
+        stream = client.chat.completions.create(**chunk_kwargs)
+        last_ui = _time.time()
+        for c in stream:
+            if not c.choices:
+                continue
+            choice = c.choices[0]
+            delta = choice.delta.content or ""
+            if not delta:
+                if choice.finish_reason:
+                    break
+                continue
+            chunk_result += delta
+            now = _time.time()
+            if now - last_ui >= 0.5:
+                last_ui = now
+                try:
+                    chars = len(chunk_result)
+                    done = len(re.findall(r'第\s*\d+\s*集', chunk_result))
+                    progress_text.markdown(
+                        f"✍️ 第{tgt_ep_start}-{tgt_ep_end}集改写中... "
+                        f"已输出 **{chars:,}** 字 | 已完成约 **{done}/{tgt_count}** 集"
+                    )
+                except Exception:
+                    pass
+    except Exception as e:
+        if chunk_result:
+            pass
+        else:
+            raise
+
+    # ═══════════════════════════════════════════════════════════════
+    # 后处理：校验集数，超限则截断
+    # ═══════════════════════════════════════════════════════════════
+    ep_markers = list(re.finditer(r'第\s*(\d+)\s*集', chunk_result))
+    actual_ep_count = len(ep_markers)
+
+    if actual_ep_count > tgt_count and tgt_count > 0:
+        # 找到第 tgt_count+1 个集标记的位置，从那里截断
+        cutoff = ep_markers[tgt_count].start()
+        chunk_result = chunk_result[:cutoff].strip()
+        progress_text.markdown(
+            f"⚠️ 本块模型输出了 {actual_ep_count} 集（超限），"
+            f"已自动截断至 {tgt_count} 集"
+        )
+    elif actual_ep_count < tgt_count and tgt_count > 0:
+        progress_text.markdown(
+            f"⚠️ 本块仅输出 {actual_ep_count} 集，"
+            f"后续将尝试补写缺失的 {tgt_count - actual_ep_count} 集"
+        )
+
+    return chunk_result
+
+
+def _compute_chunk_plan(src_ep: int, tgt_ep: int, source_blocks: list[dict]) -> list[dict]:
+    """
+    计算分块改编计划：将原始集数块分组，映射到目标集数范围。
+
+    返回: [{
+        src_blocks: [原始块索引],    # 本轮要处理的原始块
+        src_ep_range: (start, end),  # 原始集数范围
+        tgt_ep_range: (start, end),  # 目标集数范围
+    }, ...]
+    """
+    if not source_blocks:
+        return []
+
+    total_src = src_ep if src_ep > 0 else len(source_blocks)
+    total_tgt = tgt_ep if tgt_ep > 0 else total_src
+
+    # 决定分几块：每块目标 8-12 集为宜（微短剧每集短，块可以多些）
+    # 原则：块数 = ceil(tgt / 12)，但至少 1 块，最多 8 块
+    import math
+    num_chunks = max(1, min(8, math.ceil(total_tgt / 12)))
+
+    # 如果原始块少于目标块数，每个原始块就是一个 chunk
+    num_chunks = min(num_chunks, len(source_blocks)) if len(source_blocks) > 1 else max(1, num_chunks)
+
+    # 将原始块平均分为 num_chunks 组
+    src_groups = []
+    per_group = len(source_blocks) / num_chunks
+    for i in range(num_chunks):
+        start_idx = int(i * per_group)
+        end_idx = int((i + 1) * per_group)
+        src_groups.append(list(range(start_idx, end_idx)))
+
+    # 计算每组对应的目标集数范围
+    tgt_per_chunk = total_tgt / num_chunks
+    plan = []
+    for i, group in enumerate(src_groups):
+        tgt_start = int(i * tgt_per_chunk) + 1
+        tgt_end = int((i + 1) * tgt_per_chunk)
+        if i == num_chunks - 1:
+            tgt_end = total_tgt  # 最后一块兜底确保精确
+
+        # 原始集数范围
+        src_start = source_blocks[group[0]]["ep_start"] if group else 0
+        src_end = source_blocks[group[-1]]["ep_end"] if group else 0
+
+        plan.append({
+            "src_blocks": group,
+            "src_ep_range": (src_start, src_end),
+            "tgt_ep_range": (tgt_start, tgt_end),
+        })
+
+    return plan
+
+
+def _render_script_rewrite():
+    """剧本改编 Tab 的完整 UI"""
+    st.markdown("### ✂️ 剧本改编")
+    st.caption("上传原始剧本，填写改编指令（如「10集扩充为20集」），选择风格后一键改编")
+
+    # ── 文件上传 ──
+    uploaded = st.file_uploader(
+        "📁 上传原始剧本文件",
+        type=["docx", "txt", "md"],
+        key="rewrite_file_uploader",
+        help="支持 .docx / .txt / .md 格式"
+    )
+
+    if uploaded is not None:
+        from production.llm_utils import read_uploaded_file
+        content = read_uploaded_file(uploaded)
+        if content:
+            _set_ss("rewrite_source_text", content)
+
+    source_text = _ss("rewrite_source_text")
+
+    if source_text:
+        char_count = len(source_text)
+        # 简单估算集数：按约1500字/集估算
+        est_episodes = max(1, round(char_count / 1500))
+        st.success(f"✅ 已加载剧本，共 **{char_count:,}** 字符（约 {est_episodes} 集）")
+        with st.expander("👁 预览原始剧本（前500字）", expanded=False):
+            st.text(source_text[:500] + ("..." if len(source_text) > 500 else ""))
+    else:
+        st.info("📭 请上传剧本文件，或可直接在下方文本框中粘贴剧本内容")
+
+    # 粘贴输入区（备选）
+    paste_text = st.text_area(
+        "📋 或直接粘贴剧本内容",
+        value="",
+        placeholder="也可以直接在这里粘贴剧本文本...",
+        height=120,
+        key="rewrite_paste_input"
+    )
+    if paste_text.strip():
+        _set_ss("rewrite_source_text", paste_text.strip())
+        source_text = paste_text.strip()
+
+    st.markdown("---")
+
+    # ── 改编指令 ──
+    rewrite_instruction = st.text_area(
+        "📝 改编指令",
+        value="",
+        placeholder=(
+            "例如：\n"
+            "• 将10集剧本扩充为20集，保持核心情节不变\n"
+            "• 将20集剧本压缩为10集精华版\n"
+            "• 将男主职业改为黑客，并相应调整剧情逻辑\n"
+            "• 增加一条感情支线，第5集开始引入女配角"
+        ),
+        height=140,
+        key="rewrite_instruction_input"
+    )
+
+    # ── 风格选择 ──
+    st.markdown("**🎭 改编风格导向**")
+    style_col1, style_col2 = st.columns(2)
+    with style_col1:
+        is_emotion = st.toggle(
+            "🔥 情绪导向",
+            value=True,
+            key="rewrite_style_emotion",
+            help="竖屏微短剧/短剧：多巴胺爽剧节奏，情绪优先，每集必有爽点"
+        )
+    with style_col2:
+        is_structure = st.toggle(
+            "🏛 结构导向",
+            value=False,
+            key="rewrite_style_structure",
+            help="中长剧/电影：三幕结构、人物弧光、逻辑自洽，好莱坞工业标准"
+        )
+
+    # 互斥处理
+    if is_emotion and is_structure:
+        st.warning("⚠️ 请只选择一种风格导向")
+        return
+    if not is_emotion and not is_structure:
+        rewrite_style = "emotion"   # 默认情绪导向
+    elif is_emotion:
+        rewrite_style = "emotion"
+    else:
+        rewrite_style = "structure"
+
+    style_label = "🔥 情绪导向（多巴胺爽剧）" if rewrite_style == "emotion" else "🏛 结构导向（三幕式）"
+    st.caption(f"当前风格：{style_label}")
+
+    st.markdown("---")
+
+    # ── 开始改编按钮 ──
+    can_start = bool(source_text.strip()) and bool(rewrite_instruction.strip()) and not _ss("rewrite_running")
+    if st.button(
+        "✂️ 开始改编",
+        type="primary",
+        use_container_width=True,
+        disabled=not can_start
+    ):
+        if not source_text.strip():
+            st.warning("⚠️ 请先上传或粘贴原始剧本")
+            return
+        if not rewrite_instruction.strip():
+            st.warning("⚠️ 请填写改编指令")
+            return
+
+        _set_ss("rewrite_running", True)
+        _set_ss("rewrite_result", "")
+
+        # ── 解析集数，构建强约束 ──
+        src_ep, tgt_ep = _parse_episode_numbers(rewrite_instruction.strip(), source_text)
+        episode_constraint = _build_episode_constraint(src_ep, tgt_ep, rewrite_instruction.strip())
+
+        # 将集数约束注入 System Prompt（单次调用模式用）
+        raw_style_prompt = _REWRITE_EMOTION_PROMPT if rewrite_style == "emotion" else _REWRITE_STRUCTURE_PROMPT
+        style_prompt = raw_style_prompt.format(episode_constraint=episode_constraint)
+
+        # 分块模式专用 Prompt（不含全局集数约束，避免冲突）
+        chunk_style_prompt = (
+            _CHUNK_EMOTION_PROMPT if rewrite_style == "emotion" else _CHUNK_STRUCTURE_PROMPT
+        )
+
+        provider, base_url, api_key, model = _get_llm_params()
+        import httpx
+        from openai import OpenAI
+        import time as _time
+
+        custom_http = httpx.Client(timeout=600.0, trust_env=False)
+        if "Ollama" in provider:
+            client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama", http_client=custom_http)
+        else:
+            client = OpenAI(base_url=base_url, api_key=api_key or "sk-local", http_client=custom_http)
+
+        # ── 判断是否需要分块改编 ──
+        # 规则：目标集数 > 15 或 原始文本 > 15000 字 → 自动启用分块流水线
+        need_chunking = (tgt_ep > 15) or (len(source_text) > 15000 and tgt_ep > 0) or (tgt_ep == 0 and len(source_text) > 15000)
+
+        full_result = ""
+        ws_broken = False
+        start_time = _time.time()
+
+        if tgt_ep > 0 and src_ep > 0:
+            status_title = f"⏳ 正在改编：{src_ep}集 → {tgt_ep}集"
+        elif tgt_ep > 0:
+            status_title = f"⏳ 正在改编，目标 {tgt_ep} 集"
+        else:
+            status_title = "⏳ 正在连接模型，准备改编..."
+
+        status_box = st.status(status_title, expanded=True)
+        progress_text = status_box.empty()
+        result_area = status_box.empty()
+
+        try:
+            if not need_chunking:
+                # ═════════════════════════════════════════════════════════
+                # 小体量：单次调用模式（与原逻辑一致）
+                # ═════════════════════════════════════════════════════════
+                tgt_ep_notice = (
+                    f"\n\n⚠️ **核心约束再次确认：你必须输出恰好 {tgt_ep} 集，从第1集到第{tgt_ep}集，一集不多一集不少。**"
+                    if tgt_ep > 0 else ""
+                )
+                user_msg = f"""## 【改编指令（最高优先级，必须严格执行）】
+
+{rewrite_instruction.strip()}
+{tgt_ep_notice}
+
+---
+
+## 原始剧本（共 {src_ep} 集，仅供参考，情节可删改合并）
+
+{source_text}
+
+---
+
+## 输出要求
+请严格按照上述改编指令，输出完整的改编后剧本。
+{f"目标集数：**{tgt_ep} 集**，从第1集写到第{tgt_ep}集，必须全部输出完整内容。" if tgt_ep > 0 else "按指令要求的集数输出完整改编剧本。"}
+每集用"========================================"分隔，开头标注"第X集"。"""
+
+                is_ollama = "Ollama" in provider
+                if tgt_ep > 0:
+                    dynamic_max_tokens = max(16384, min(131072, tgt_ep * 2500))
+                else:
+                    dynamic_max_tokens = 32768
+
+                if is_ollama:
+                    extra = {"extra_body": {"options": {"num_ctx": 131072, "num_predict": max(16384, min(131072, dynamic_max_tokens))}}}
+                else:
+                    extra = {"max_tokens": dynamic_max_tokens}
+
+                if tgt_ep > 0:
+                    progress_text.info(
+                        f"🎯 已识别改编目标：**{src_ep} 集 → {tgt_ep} 集** | "
+                        f"单次调用模式 | 输出上限：{dynamic_max_tokens:,} tokens"
+                    )
+
+                stream = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": style_prompt},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    stream=True,
+                    temperature=0.8,
+                    **extra
+                )
+
+                progress_text.markdown("🤖 模型已响应，正在生成改编内容...")
+                last_update = _time.time()
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta.content or ""
+                    if not delta:
+                        if choice.finish_reason:
+                            break
+                        continue
+                    full_result += delta
+                    now = _time.time()
+                    if now - last_update >= 0.3:
+                        last_update = now
+                        try:
+                            char_count = len(full_result)
+                            done_eps = len(re.findall(r'第\s*\d+\s*集', full_result))
+                            ep_info = f" | 已完成 **{done_eps}/{tgt_ep}** 集" if tgt_ep > 0 else ""
+                            elapsed = now - start_time
+                            progress_text.markdown(
+                                f"🤖 正在生成改编内容... 已输出 **{char_count:,}** 字 | "
+                                f"用时 **{elapsed:.0f}** 秒{ep_info}"
+                            )
+                            result_area.markdown(full_result + " ▌")
+                        except Exception:
+                            ws_broken = True
+
+            else:
+                # ═════════════════════════════════════════════════════════
+                # 大体量：分块改编流水线
+                # Phase 0 → Phase 1-N → Phase Final
+                # ═════════════════════════════════════════════════════════
+                progress_text.info(
+                    f"🎯 已识别改编目标：**{src_ep} 集 → {tgt_ep} 集** | "
+                    f"体量较大，启用分块改编流水线..."
+                )
+
+                # ── Phase 0：生成故事摘要 ──
+                progress_text.markdown("📋 **Phase 0/3**：正在分析原始剧本，生成全局摘要...")
+                story_summary = _generate_story_summary(
+                    client, model, provider, source_text,
+                    rewrite_style, rewrite_instruction.strip(), {}
+                )
+                if story_summary:
+                    progress_text.markdown(
+                        f"📋 **Phase 0/3**：全局摘要已生成（{len(story_summary):,} 字）✅"
+                    )
+
+                # ── 切分原始剧本 ──
+                source_blocks = _split_source_by_episodes(source_text)
+                chunk_plan = _compute_chunk_plan(src_ep, tgt_ep, source_blocks)
+                total_chunks = len(chunk_plan)
+
+                progress_text.markdown(
+                    f"✂️ **Phase 1/3**：已将原始剧本切分为 **{len(source_blocks)}** 段，"
+                    f"计划分 **{total_chunks}** 轮改写 | "
+                    f"目标：第1集→第{tgt_ep}集"
+                )
+
+                # ── Phase 1-N：逐块改写 ──
+                chunk_results = []
+                prev_tail = ""
+
+                for ci, plan_item in enumerate(chunk_plan):
+                    tgt_start, tgt_end = plan_item["tgt_ep_range"]
+                    src_start, src_end = plan_item["src_ep_range"]
+                    src_indices = plan_item["src_blocks"]
+
+                    # 拼接本块的原始剧本内容
+                    chunk_src = "\n\n".join(
+                        source_blocks[idx]["content"] for idx in src_indices if idx < len(source_blocks)
+                    )
+
+                    # 每块单独的 status 容器
+                    chunk_label = (
+                        f"✍️ 第 {ci+1}/{total_chunks} 轮改写："
+                        f"原始第{src_start}-{src_end}集 → 目标第{tgt_start}-{tgt_end}集"
+                    )
+
+                    progress_text.markdown(
+                        f"**Phase 1/3 — {ci+1}/{total_chunks}**：{chunk_label}"
+                    )
+
+                    # 执行单块改写（传入分块专用Prompt + 原始集数范围）
+                    chunk_result = _rewrite_single_chunk(
+                        client, model, provider,
+                        chunk_style_prompt,
+                        chunk_src, story_summary,
+                        rewrite_instruction.strip(),
+                        src_start, src_end,
+                        tgt_start, tgt_end,
+                        prev_tail, {},
+                        status_box, progress_text,
+                    )
+
+                    # 收集结果
+                    chunk_results.append(chunk_result)
+                    full_result = "\n\n========================================\n\n".join(chunk_results)
+
+                    # 更新前情衔接：取本块改写结果的最后800字
+                    prev_tail = chunk_result[-800:] if len(chunk_result) > 800 else chunk_result
+
+                    # 更新全局UI
+                    elapsed = _time.time() - start_time
+                    total_chars = len(full_result)
+                    actual_eps = len(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
+                    try:
+                        result_area.markdown(full_result + " ▌")
+                        progress_text.markdown(
+                            f"✅ 第 {ci+1}/{total_chunks} 轮改写完成 | "
+                            f"累计 **{total_chars:,}** 字 | "
+                            f"已完成约 **{actual_eps}** 集 | "
+                            f"用时 **{elapsed:.0f}** 秒"
+                        )
+                    except Exception:
+                        ws_broken = True
+
+                # ── Phase Final：合并 + 衔接检查 ──
+                progress_text.markdown(
+                    f"🔗 **Phase 2/3**：正在合并 {total_chunks} 段改写结果，检查集数完整性..."
+                )
+
+                # 合并所有块
+                full_result = "\n\n========================================\n\n".join(chunk_results)
+
+                # 统计实际集数
+                actual_ep_nums = sorted(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
+                final_ep_count = len(actual_ep_nums)
+
+                # 如果集数不够，尝试补写缺失的集
+                if tgt_ep > 0 and final_ep_count < tgt_ep:
+                    missing_start = final_ep_count + 1
+                    missing_count = tgt_ep - final_ep_count
+
+                    progress_text.markdown(
+                        f"🔧 **Phase 3/3**：检测到缺失 **{missing_count}** 集"
+                        f"（第{missing_start}-{tgt_ep}集），正在补写..."
+                    )
+
+                    # 补写缺失的集数
+                    supplement_prompt = chunk_style_prompt
+                    supplement_user = f"""## 全剧摘要（全局参考）
+{story_summary}
+
+---
+
+## 前情衔接（已输出的最后部分）
+{prev_tail}
+
+---
+
+## 补写任务
+前面的改写已输出第1集到第{final_ep_count}集。
+你必须**紧接着**前情，输出第{missing_start}集到第{tgt_ep}集，共{missing_count}集。
+- 开头必须与前情自然衔接
+- 每集必须有完整的场景和对白
+- 每集用"========================================"分隔，开头标注"第X集"
+- 改编指令：{rewrite_instruction.strip()}"""
+
+                    is_ollama = "Ollama" in provider
+                    supplement_max = max(8192, min(32768, missing_count * 2500))
+                    if is_ollama:
+                        supp_kwargs = dict(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": supplement_prompt},
+                                {"role": "user", "content": supplement_user},
+                            ],
+                            stream=True,
+                            temperature=0.8,
+                            extra_body={"options": {"num_ctx": 131072, "num_predict": supplement_max}},
+                        )
+                    else:
+                        supp_kwargs = dict(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": supplement_prompt},
+                                {"role": "user", "content": supplement_user},
+                            ],
+                            stream=True,
+                            temperature=0.8,
+                            max_tokens=supplement_max,
+                        )
+
+                    supplement_result = ""
+                    try:
+                        supp_stream = client.chat.completions.create(**supp_kwargs)
+                        for c in supp_stream:
+                            if not c.choices:
+                                continue
+                            choice = c.choices[0]
+                            delta = choice.delta.content or ""
+                            if not delta:
+                                if choice.finish_reason:
+                                    break
+                                continue
+                            supplement_result += delta
+                    except Exception:
+                        pass
+
+                    if supplement_result.strip():
+                        full_result += "\n\n========================================\n\n" + supplement_result.strip()
+                        progress_text.markdown(f"🔧 补写完成，新增约 **{len(supplement_result):,}** 字")
+                    else:
+                        progress_text.warning("⚠️ 补写未能生成内容，可能受模型限制")
+                else:
+                    progress_text.markdown("🔗 合并完成，集数完整 ✅")
+
+            # ═════════════════════════════════════════════════════════
+            # 统一收尾逻辑（无论分块/单次）
+            # ═════════════════════════════════════════════════════════
+            elapsed = _time.time() - start_time
+            if full_result:
+                final_ep_count = len(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
+                _set_ss("rewrite_result", full_result)
+                _set_ss("script_content", full_result)
+                from shared.session import CREATOR_SCRIPTS
+                _set_ss("workflow_stage", CREATOR_SCRIPTS)
+
+                ep_summary = (
+                    f" | 实际输出 {final_ep_count} 集"
+                    + ("" if tgt_ep == 0 else
+                       " ✅" if final_ep_count >= tgt_ep else
+                       f" ⚠️（目标{tgt_ep}集，差{tgt_ep - final_ep_count}集）")
+                ) if final_ep_count > 0 else ""
+
+                mode_label = "分块流水线" if need_chunking else "单次调用"
+                label = (
+                    f"✅ 改编完成（{mode_label}）| {len(full_result):,} 字{ep_summary} | {elapsed:.0f} 秒"
+                )
+                status_box.update(label=label, state="complete", expanded=False)
+                if not ws_broken:
+                    result_area.markdown(full_result)
+
+                # 集数不足时给用户提示
+                if tgt_ep > 0 and final_ep_count < tgt_ep:
+                    st.warning(
+                        f"⚠️ 改编输出 **{final_ep_count}** 集，未达到目标 **{tgt_ep}** 集。\n\n"
+                        f"系统已自动尝试补写但仍未满足。可尝试：\n"
+                        f"1. 缩减目标集数（如60→50集→40集分步走）\n"
+                        f"2. 换用支持更长上下文的模型\n"
+                        f"3. 将改编指令写得更具体，减少模型自由发挥空间"
+                    )
+            else:
+                status_box.update(label="⚠️ 模型未返回任何内容", state="error", expanded=True)
+                progress_text.warning("模型未生成任何内容，请检查模型配置或重试。")
+
+        except Exception as e:
+            err_msg = str(e)
+            if full_result:
+                _set_ss("rewrite_result", full_result)
+                _set_ss("script_content", full_result)
+                from shared.session import CREATOR_SCRIPTS
+                _set_ss("workflow_stage", CREATOR_SCRIPTS)
+                status_box.update(
+                    label=f"⚠️ 改编中断（已保存部分结果 {len(full_result):,} 字）",
+                    state="error", expanded=True
+                )
+                progress_text.error(f"生成过程中出错：{err_msg}")
+                progress_text.info("已保存的部分结果可在下方查看或下载。")
+            else:
+                status_box.update(label="❌ 改编失败", state="error", expanded=True)
+                progress_text.error(f"改编失败：{err_msg}")
+        finally:
+            _set_ss("rewrite_running", False)
+
+    # ── 显示改编结果 ──
+    rewrite_result = _ss("rewrite_result")
+    if rewrite_result and not _ss("rewrite_running"):
+        st.markdown("---")
+        st.success("✅ 改编完成！结果已同步到右侧「剧本正文」标签页")
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                "📥 下载改编后剧本",
+                rewrite_result,
+                file_name="改编剧本.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+        with col_dl2:
+            if st.button("🔄 清空重新改编", use_container_width=True, key="rewrite_clear_btn"):
+                _set_ss("rewrite_source_text", "")
+                _set_ss("rewrite_result", "")
+                st.rerun()
 
 
 # =============================================================================
@@ -1201,6 +2420,44 @@ def render_creator():
     """渲染创作流完整UI"""
 
     # =========================================================================
+    # Harness: 断点续传检测 — 发现上次未完成的 checkpoint 提示恢复
+    # =========================================================================
+    if _HARNESS_AVAILABLE and _has_checkpoints():
+        current_stage = _ss("workflow_stage")
+        has_content = bool(_ss("script_content") or _ss("global_outline"))
+        latest_cp = _get_latest_checkpoint()
+        cp_name = latest_cp.get("name", "") or latest_cp.get("checkpoint_id", "")
+        cp_time = latest_cp.get("readable_time", "")
+        cp_ep = latest_cp.get("current_episode", 0)
+        cp_total = latest_cp.get("total_episodes", 0)
+
+        if not has_content and current_stage == CREATOR_IDLE:
+            # 有 checkpoint 但当前是空白状态 — 提示恢复
+            with st.container(border=True):
+                col_chk, col_btn1, col_btn2 = st.columns([2, 1, 1])
+                with col_chk:
+                    st.info(
+                        f"💾 **发现未完成的创作存档**\n\n"
+                        f"「{cp_name}」\n\n"
+                        f"进度：第 {cp_ep}/{cp_total} 集"
+                        + (f" | {cp_time}" if cp_time else "")
+                    )
+                with col_btn1:
+                    if st.button("📂 恢复上次进度", type="primary", use_container_width=True,
+                                 key="harness_restore_btn"):
+                        if _restore_latest_checkpoint():
+                            st.success("✅ 已恢复创作进度！")
+                            time.sleep(0.3)
+                            st.rerun()
+                        else:
+                            st.error("恢复失败，请手动开始新创作")
+                with col_btn2:
+                    if st.button("🗑️ 清除存档", use_container_width=True,
+                                 key="harness_clear_btn"):
+                        _delete_all_checkpoints()
+                        st.rerun()
+
+    # =========================================================================
     # 跨模式检测：从剧本分析跳转而来
     # =========================================================================
     cross_source = st.session_state.get("cross_mode_source", "")
@@ -1254,114 +2511,41 @@ def render_creator():
         st.markdown("## 💡 灵感与控制")
         st.markdown("---")
 
-        creative_idea = st.text_area(
-            "📝 输入剧本核心创意和思路",
-            value="",
-            placeholder="例如：我想写一个50集的被嘲讽穷小子逆袭首富的爽剧，主角被未婚妻当众羞辱退婚后，意外发现自己原来是隐形富豪的儿子...",
-            height=200,
-            help="输入您想要创作的故事核心概念、主题或灵感"
-        )
+        left_tab_create, left_tab_rewrite = st.tabs(["🎬 创意生成", "✂️ 剧本改编"])
 
-        stage = _ss("workflow_stage")
+        # =====================================================================
+        # Tab A：创意生成（原有逻辑）
+        # =====================================================================
+        with left_tab_create:
+            creative_idea = st.text_area(
+                "📝 输入剧本核心创意和思路",
+                value="",
+                placeholder="例如：我想写一个50集的被嘲讽穷小子逆袭首富的爽剧，主角被未婚妻当众羞辱退婚后，意外发现自己原来是隐形富豪的儿子...",
+                height=200,
+                help="输入您想要创作的故事核心概念、主题或灵感"
+            )
 
-        # ── 阶段一：启动架构师 ──
-        if stage == CREATOR_IDLE:
-            st.markdown("")
-            if st.button(
-                "🚀 启动多智能体编剧工坊（生成大纲）",
-                type="primary",
-                use_container_width=True,
-                disabled=_ss("workflow_running")
-            ):
-                if not creative_idea.strip():
-                    st.warning("⚠️ 请先输入剧本创意!")
-                else:
-                    provider, base_url, api_key, model = _get_llm_params()
-                    _format_name = st.session_state.script_format
-                    _format_display = SCRIPT_FORMATS.get(_format_name, _format_name)
+            stage = _ss("workflow_stage")
 
-                    thread = threading.Thread(
-                        target=_execute_showrunner_thread,
-                        args=(creative_idea, _format_display, provider, base_url, api_key, model),
-                        daemon=True
-                    )
-                    add_script_run_ctx(thread)
-                    thread.start()
-                    time.sleep(0.5)
-                    st.rerun()
-
-        # ── 阶段一完成：大纲审核 ──
-        elif stage == CREATOR_OUTLINE:
-            st.success("✅ 全局大纲已生成！")
-
-            if _ss("stage1_total_episodes") > 0:
-                st.info(
-                    f"🎯 识别到 **[总集数: {_ss('stage1_total_episodes')}]**，"
-                    f"确认后将批量生成 {_ss('stage1_total_episodes')} 集完整剧本"
-                )
-
-            if is_micro_drama_mode(st.session_state.script_format):
-                st.warning(
-                    "🔥 检测到竖屏微短剧格式，将注入**多巴胺爽剧**规则："
-                    "痛点抛出 → 迅速打脸 → 新钩子"
-                )
-
-            st.markdown("")
-            if st.button(
-                "✅ 大纲确认无误，开始批量生成正文剧本",
-                type="primary",
-                use_container_width=True,
-                disabled=_ss("workflow_running")
-            ):
-                provider, base_url, api_key, model = _get_llm_params()
-                _format_display = SCRIPT_FORMATS.get(
-                    st.session_state.script_format, st.session_state.script_format
-                )
-
-                thread = threading.Thread(
-                    target=_execute_scripts_thread,
-                    args=(
-                        _ss("stage1_creative_idea"), _format_display,
-                        _ss("stage1_outline"), _ss("stage1_total_episodes"),
-                        provider, base_url, api_key, model
-                    ),
-                    daemon=True
-                )
-                add_script_run_ctx(thread)
-                thread.start()
-                time.sleep(0.5)
-                st.rerun()
-
-            # HITL 大纲定向修改
-            with st.expander("🎯 对大纲提出修改意见（定向精修）", expanded=False):
-                st.info(
-                    "💡 请输入具体的修改意见，例如："
-                    "「将男主的职业改成黑客」「结尾增加一个反转」「增加一个反派角色」"
-                )
-                outline_feedback = st.text_area(
-                    "📝 大纲修改意见", value="", placeholder="请输入针对大纲的具体修改意见...",
-                    height=120, key="outline_feedback_input"
-                )
-                col_revise, col_regen = st.columns([3, 1])
-                with col_revise:
-                    if st.button(
-                        "🎯 提交修改并让架构师精修", type="primary",
-                        use_container_width=True,
-                        disabled=(_ss("workflow_running") or not outline_feedback.strip())
-                    ):
+            # ── 阶段一：启动架构师 ──
+            if stage == CREATOR_IDLE:
+                st.markdown("")
+                if st.button(
+                    "🚀 启动多智能体编剧工坊（生成大纲）",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=_ss("workflow_running")
+                ):
+                    if not creative_idea.strip():
+                        st.warning("⚠️ 请先输入剧本创意!")
+                    else:
                         provider, base_url, api_key, model = _get_llm_params()
-                        _format_display = SCRIPT_FORMATS.get(
-                            st.session_state.script_format, st.session_state.script_format
-                        )
-                        _prev = _ss("hitl_previous_outline") or _ss("stage1_outline")
+                        _format_name = st.session_state.script_format
+                        _format_display = SCRIPT_FORMATS.get(_format_name, _format_name)
 
                         thread = threading.Thread(
-                            target=_execute_outline_revision_thread,
-                            args=(
-                                _ss("stage1_creative_idea"), _format_display,
-                                _prev, outline_feedback.strip(),
-                                provider, base_url, api_key, model
-                            ),
+                            target=_execute_showrunner_thread,
+                            args=(creative_idea, _format_display, provider, base_url, api_key, model),
                             daemon=True
                         )
                         add_script_run_ctx(thread)
@@ -1369,113 +2553,76 @@ def render_creator():
                         time.sleep(0.5)
                         st.rerun()
 
-                with col_regen:
-                    if st.button("🔄 全量重写", use_container_width=True,
-                                 disabled=_ss("workflow_running")):
-                        _set_ss("hitl_previous_outline", "")
-                        creator_clear_outputs()
-                        st.rerun()
+            # ── 阶段一完成：大纲审核 ──
+            elif stage == CREATOR_OUTLINE:
+                st.success("✅ 全局大纲已生成！")
 
-        # ── 阶段二：剧本生成中/完成 ──
-        elif stage == CREATOR_SCRIPTS:
-            if _ss("workflow_running"):
-                st.info(f"🔄 正在生成剧本... 第 {_ss('current_episode')}/{_ss('total_episodes')} 集")
-                if _ss("total_episodes") > 0:
-                    st.progress(
-                        _ss("current_episode") / _ss("total_episodes"),
-                        text=f"第 {_ss('current_episode')}/{_ss('total_episodes')} 集"
+                if _ss("stage1_total_episodes") > 0:
+                    st.info(
+                        f"🎯 识别到 **[总集数: {_ss('stage1_total_episodes')}]**，"
+                        f"确认后将批量生成 {_ss('stage1_total_episodes')} 集完整剧本"
                     )
-            else:
-                st.success("✅ 全部完成！")
 
-                # ── 重新进入桥接面板（如果之前有分析反馈和剧本文本）──
-                if (st.session_state.get("cross_mode_script_for_modification")
-                        and st.session_state.get("cross_mode_analysis_feedback")
-                        and not st.session_state.get("cross_mode_show_bridge", False)):
-                    st.markdown("---")
-                    st.info("📋 检测到您此前从「剧本分析」携带了分析反馈，可直接基于反馈修改剧本")
-                    if st.button(
-                        "✏️ 打开剧本修改工作台（基于分析反馈）",
-                        type="primary", use_container_width=True,
-                        key="btn_reopen_bridge"
-                    ):
-                        st.session_state.cross_mode_show_bridge = True
-                        st.rerun()
+                if is_micro_drama_mode(st.session_state.script_format):
+                    st.warning(
+                        "🔥 检测到竖屏微短剧格式，将注入**多巴胺爽剧**规则："
+                        "痛点抛出 → 迅速打脸 → 新钩子"
+                    )
 
-                # ── 跨模式导航：转入剧本分析 ──
-                if _ss("script_content"):
-                    st.markdown("---")
-                    col_transfer, col_download = st.columns([1, 1])
-                    with col_transfer:
+                st.markdown("")
+                if st.button(
+                    "✅ 大纲确认无误，开始批量生成正文剧本",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=_ss("workflow_running")
+                ):
+                    provider, base_url, api_key, model = _get_llm_params()
+                    _format_display = SCRIPT_FORMATS.get(
+                        st.session_state.script_format, st.session_state.script_format
+                    )
+
+                    thread = threading.Thread(
+                        target=_execute_scripts_thread,
+                        args=(
+                            _ss("stage1_creative_idea"), _format_display,
+                            _ss("stage1_outline"), _ss("stage1_total_episodes"),
+                            provider, base_url, api_key, model
+                        ),
+                        daemon=True
+                    )
+                    add_script_run_ctx(thread)
+                    thread.start()
+                    time.sleep(0.5)
+                    st.rerun()
+
+                # HITL 大纲定向修改
+                with st.expander("🎯 对大纲提出修改意见（定向精修）", expanded=False):
+                    st.info(
+                        "💡 请输入具体的修改意见，例如："
+                        "「将男主的职业改成黑客」「结尾增加一个反转」「增加一个反派角色」"
+                    )
+                    outline_feedback = st.text_area(
+                        "📝 大纲修改意见", value="", placeholder="请输入针对大纲的具体修改意见...",
+                        height=120, key="outline_feedback_input"
+                    )
+                    col_revise, col_regen = st.columns([3, 1])
+                    with col_revise:
                         if st.button(
-                            "🔬 转入剧本分析（整体评估）",
-                            type="primary",
+                            "🎯 提交修改并让架构师精修", type="primary",
                             use_container_width=True,
-                        ):
-                            st.session_state.active_tab = "🎬 剧本分析"
-                            st.session_state.analysis_auto_load = True
-                            st.rerun()
-                    with col_download:
-                        st.caption("💡 转入分析后，系统将自动识别剧本类型并选用对应审核标准")
-
-                # HITL 单集定向修改
-                if _ss("total_episodes") > 0:
-                    st.markdown("---")
-                    st.markdown("### 🎯 单集剧本定向精修")
-
-                    episode_options = list(range(1, _ss("total_episodes") + 1))
-                    selected_ep = st.selectbox(
-                        "📺 选择要修改的集数", options=episode_options, index=0,
-                        format_func=lambda x: f"第 {x} 集", key="episode_select_for_revision"
-                    )
-
-                    # 预览该集当前内容
-                    current_script = ""
-                    if _ss("script_content"):
-                        sep = "\n\n" + "=" * 40 + "\n\n"
-                        episodes = _ss("script_content").split(sep)
-                        for ep in episodes:
-                            if re.search(r'第\s*' + str(selected_ep) + r'\s*集', ep):
-                                current_script = ep.strip()
-                                break
-
-                    if current_script:
-                        with st.expander(f"📄 第 {selected_ep} 集当前内容预览", expanded=False):
-                            st.markdown(current_script[:500] + ("..." if len(current_script) > 500 else ""))
-
-                    # 医生驳回提示
-                    rejections = _ss("last_doctor_rejection")
-                    if selected_ep in rejections:
-                        st.error(f"⚠️ 医生仍需修改（第 {selected_ep} 集）：")
-                        st.markdown(rejections[selected_ep][:300])
-
-                    episode_feedback = st.text_area(
-                        "📝 本集修改意见", value="",
-                        placeholder=f"输入针对第 {selected_ep} 集剧本的具体修改意见...",
-                        height=100, key=f"episode_feedback_{selected_ep}"
-                    )
-
-                    col_ep_revise, col_ep_new = st.columns([3, 1])
-                    with col_ep_revise:
-                        if st.button(
-                            f"🎯 提交第 {selected_ep} 集修改（编剧精修 → 医生审核）",
-                            type="primary", use_container_width=True,
-                            disabled=(_ss("workflow_running") or not episode_feedback.strip())
+                            disabled=(_ss("workflow_running") or not outline_feedback.strip())
                         ):
                             provider, base_url, api_key, model = _get_llm_params()
                             _format_display = SCRIPT_FORMATS.get(
                                 st.session_state.script_format, st.session_state.script_format
                             )
-                            _prev_scripts = _ss("hitl_previous_episode_scripts")
-                            _prev_script = _prev_scripts.get(selected_ep, "") or current_script
+                            _prev = _ss("hitl_previous_outline") or _ss("stage1_outline")
 
                             thread = threading.Thread(
-                                target=_execute_episode_revision_thread,
+                                target=_execute_outline_revision_thread,
                                 args=(
-                                    selected_ep, _ss("total_episodes"),
-                                    _format_display, _ss("stage1_outline"),
-                                    "", _ss("memory_snapshot"),
-                                    _prev_script, episode_feedback.strip(),
+                                    _ss("stage1_creative_idea"), _format_display,
+                                    _prev, outline_feedback.strip(),
                                     provider, base_url, api_key, model
                                 ),
                                 daemon=True
@@ -1485,27 +2632,149 @@ def render_creator():
                             time.sleep(0.5)
                             st.rerun()
 
-                    with col_ep_new:
-                        if st.button("🔄 开始新一轮", use_container_width=True):
+                    with col_regen:
+                        if st.button("🔄 全量重写", use_container_width=True,
+                                     disabled=_ss("workflow_running")):
+                            _set_ss("hitl_previous_outline", "")
                             creator_clear_outputs()
                             st.rerun()
+
+            # ── 阶段二：剧本生成中/完成 ──
+            elif stage == CREATOR_SCRIPTS:
+                if _ss("workflow_running"):
+                    st.info(f"🔄 正在生成剧本... 第 {_ss('current_episode')}/{_ss('total_episodes')} 集")
+                    if _ss("total_episodes") > 0:
+                        st.progress(
+                            _ss("current_episode") / _ss("total_episodes"),
+                            text=f"第 {_ss('current_episode')}/{_ss('total_episodes')} 集"
+                        )
                 else:
-                    if st.button("🔄 开始新一轮创作", use_container_width=True):
-                        creator_clear_outputs()
-                        st.rerun()
+                    st.success("✅ 全部完成！")
 
-        # ── 日志显示 ──
-        st.markdown("---")
-        st.markdown("### 📋 终端日志")
-        logs = _ss("logs")
-        if logs:
-            st.code("\n".join(logs), language="bash")
-        else:
-            st.info("📭 日志区域\n\n点击「启动多智能体编剧工坊」开始生成大纲")
+                    # ── 重新进入桥接面板（如果之前有分析反馈和剧本文本）──
+                    if (st.session_state.get("cross_mode_script_for_modification")
+                            and st.session_state.get("cross_mode_analysis_feedback")
+                            and not st.session_state.get("cross_mode_show_bridge", False)):
+                        st.markdown("---")
+                        st.info("📋 检测到您此前从「剧本分析」携带了分析反馈，可直接基于反馈修改剧本")
+                        if st.button(
+                            "✏️ 打开剧本修改工作台（基于分析反馈）",
+                            type="primary", use_container_width=True,
+                            key="btn_reopen_bridge"
+                        ):
+                            st.session_state.cross_mode_show_bridge = True
+                            st.rerun()
 
-        if _ss("workflow_running"):
-            time.sleep(2)
-            st.rerun()
+                    # ── 跨模式导航：转入剧本分析 ──
+                    if _ss("script_content"):
+                        st.markdown("---")
+                        col_transfer, col_download = st.columns([1, 1])
+                        with col_transfer:
+                            if st.button(
+                                "🔬 转入剧本分析（整体评估）",
+                                type="primary",
+                                use_container_width=True,
+                            ):
+                                st.session_state.active_tab = "🎬 剧本分析"
+                                st.session_state.analysis_auto_load = True
+                                st.rerun()
+                        with col_download:
+                            st.caption("💡 转入分析后，系统将自动识别剧本类型并选用对应审核标准")
+
+                    # HITL 单集定向修改
+                    if _ss("total_episodes") > 0:
+                        st.markdown("---")
+                        st.markdown("### 🎯 单集剧本定向精修")
+
+                        episode_options = list(range(1, _ss("total_episodes") + 1))
+                        selected_ep = st.selectbox(
+                            "📺 选择要修改的集数", options=episode_options, index=0,
+                            format_func=lambda x: f"第 {x} 集", key="episode_select_for_revision"
+                        )
+
+                        # 预览该集当前内容
+                        current_script = ""
+                        if _ss("script_content"):
+                            sep = "\n\n" + "=" * 40 + "\n\n"
+                            episodes = _ss("script_content").split(sep)
+                            for ep in episodes:
+                                if re.search(r'第\s*' + str(selected_ep) + r'\s*集', ep):
+                                    current_script = ep.strip()
+                                    break
+
+                        if current_script:
+                            with st.expander(f"📄 第 {selected_ep} 集当前内容预览", expanded=False):
+                                st.markdown(current_script[:500] + ("..." if len(current_script) > 500 else ""))
+
+                        # 医生驳回提示
+                        rejections = _ss("last_doctor_rejection")
+                        if selected_ep in rejections:
+                            st.error(f"⚠️ 医生仍需修改（第 {selected_ep} 集）：")
+                            st.markdown(rejections[selected_ep][:300])
+
+                        episode_feedback = st.text_area(
+                            "📝 本集修改意见", value="",
+                            placeholder=f"输入针对第 {selected_ep} 集剧本的具体修改意见...",
+                            height=100, key=f"episode_feedback_{selected_ep}"
+                        )
+
+                        col_ep_revise, col_ep_new = st.columns([3, 1])
+                        with col_ep_revise:
+                            if st.button(
+                                f"🎯 提交第 {selected_ep} 集修改（编剧精修 → 医生审核）",
+                                type="primary", use_container_width=True,
+                                disabled=(_ss("workflow_running") or not episode_feedback.strip())
+                            ):
+                                provider, base_url, api_key, model = _get_llm_params()
+                                _format_display = SCRIPT_FORMATS.get(
+                                    st.session_state.script_format, st.session_state.script_format
+                                )
+                                _prev_scripts = _ss("hitl_previous_episode_scripts")
+                                _prev_script = _prev_scripts.get(selected_ep, "") or current_script
+
+                                thread = threading.Thread(
+                                    target=_execute_episode_revision_thread,
+                                    args=(
+                                        selected_ep, _ss("total_episodes"),
+                                        _format_display, _ss("stage1_outline"),
+                                        "", _ss("memory_snapshot"),
+                                        _prev_script, episode_feedback.strip(),
+                                        provider, base_url, api_key, model
+                                    ),
+                                    daemon=True
+                                )
+                                add_script_run_ctx(thread)
+                                thread.start()
+                                time.sleep(0.5)
+                                st.rerun()
+
+                        with col_ep_new:
+                            if st.button("🔄 开始新一轮", use_container_width=True):
+                                creator_clear_outputs()
+                                st.rerun()
+                    else:
+                        if st.button("🔄 开始新一轮创作", use_container_width=True):
+                            creator_clear_outputs()
+                            st.rerun()
+
+            # ── 日志显示 ──
+            st.markdown("---")
+            st.markdown("### 📋 终端日志")
+            logs = _ss("logs")
+            if logs:
+                st.code("\n".join(logs), language="bash")
+            else:
+                st.info("📭 日志区域\n\n点击「启动多智能体编剧工坊」开始生成大纲")
+
+            if _ss("workflow_running"):
+                time.sleep(2)
+                st.rerun()
+
+        # =====================================================================
+        # Tab B：剧本改编
+        # =====================================================================
+        with left_tab_rewrite:
+            _render_script_rewrite()
 
     # =========================================================================
     # 右半部分: 输出区
@@ -1550,11 +2819,22 @@ def render_creator():
             script = _ss("script_content")
             if script:
                 st.markdown(script)
-                st.download_button(
-                    "📥 下载剧本", script,
-                    file_name="剧本正文.md", mime="text/markdown",
-                    use_container_width=True
-                )
+                col_dl, col_save = st.columns([1, 1])
+                with col_dl:
+                    st.download_button(
+                        "📥 下载剧本", script,
+                        file_name="剧本正文.md", mime="text/markdown",
+                        use_container_width=True
+                    )
+                with col_save:
+                    if _HARNESS_AVAILABLE:
+                        if st.button("💾 保存进度", use_container_width=True,
+                                     key="manual_save_checkpoint",
+                                     help="保存当前创作进度，刷新页面后可恢复"):
+                            _auto_save_checkpoint(name=f"手动存档-第{_ss('current_episode')}/{_ss('total_episodes')}集")
+                            st.success("✅ 进度已保存！")
+                            time.sleep(0.8)
+                            st.rerun()
             else:
                 if _ss("workflow_stage") == CREATOR_OUTLINE:
                     st.info("📭 大纲已生成，请点击左侧「✅ 大纲确认无误，开始批量生成正文剧本」按钮")

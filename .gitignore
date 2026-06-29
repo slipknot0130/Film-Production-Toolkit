@@ -43,3 +43,7 @@ env/
 
 # ── 合并计划（内部文档，不上传）──
 MERGE_PLAN.md
+
+# ── Harness 运行时缓存（本地数据，不上传）──
+.harness_memory/
+harness_checkpoints/

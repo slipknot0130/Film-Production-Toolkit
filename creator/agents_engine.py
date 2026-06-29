@@ -12,10 +12,15 @@ Multi-Agent Collaboration Engine for AI Screenwriter Studio
 """
 
 from openai import OpenAI
-from typing import Optional, Callable, List, Dict, Any
+from typing import Optional, Callable, List, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
+
+if TYPE_CHECKING:
+    from harness.memory_store import StructuredMemoryStore
+    from harness.checkpoint import CheckpointManager
+    from harness.context_retriever import ContextRetriever
 
 
 # =============================================================================
@@ -23,6 +28,54 @@ import re
 # =============================================================================
 # 竖屏微短剧的关键字（用于判断是否注入"多巴胺爽剧"规则）
 MICRO_DRAMA_KEYWORD = "竖屏微短剧"
+
+
+# =============================================================================
+# P3-2：内容安全护栏 — 广电红线避雷区
+# =============================================================================
+_SAFETY_GUARDRAIL_TEXT = """
+## ⛔ 内容安全护栏（必须遵守，违规则驳回）
+
+以下内容严禁在剧本中出现：
+- 暴力血腥的细节描写（砍杀、肢解等）
+- 色情或擦边内容（包括含蓄暗示）
+- 危害国家安全、破坏民族团结的言论
+- 宣扬封建迷信、邪教思想
+- 侮辱诽谤他人、侵犯隐私
+- 涉及未成年人不当内容
+- 过度美化违法犯罪行为
+
+如有擦边情节，必须改为暗示性处理或跳过。此护栏优先级高于所有创作规则。
+"""
+
+
+def _get_safety_guardrail_text() -> str:
+    """获取内容安全护栏文本（P3-2）。"""
+    return _SAFETY_GUARDRAIL_TEXT
+
+
+def _get_adversarial_review_text() -> str:
+    """获取对抗性审查增强文本（P3-3）。"""
+    return """
+## 🔍 对抗性审查指令（增强版）
+
+你的审查不能"走过场"。你必须：
+1. **预设剧本有问题**：以"这份剧本肯定存在至少1个问题"的心态去审查
+2. **给出对立方案**：每发现一个问题，必须给出1个具体的、不同的修改方案
+3. **不要确认偏差**：不要因为剧本整体不错就忽略小问题
+4. **挑战核心假设**：质疑剧本的关键设定是否合理
+
+审查清单（逐项打分，而非打勾）：
+- 开场15秒：冲突强度 1-10分（<6分 → 驳回并给出强化方案）
+- 打脸力度：爽感 1-10分（<7分 → 驳回并给出3个具体的增强方案）
+- 结尾钩子：悬念强度 1-10分（<6分 → 驳回并给出2个更吸引人的钩子方案）
+- 台词质量：口语化程度 1-10分（<7分 → 标注所有书面语并给出替换建议）
+"""
+
+
+# =============================================================================
+# 格式检测常量
+# =============================================================================
 
 
 def is_micro_drama_mode(script_format: str) -> bool:
@@ -48,7 +101,12 @@ def _get_format_strategy(script_format: str) -> Dict[str, str]:
 
 @dataclass
 class WorkflowContext:
-    """工作流上下文 - 在各 Agent 之间传递"""
+    """工作流上下文 - 在各 Agent 之间传递（内存态）
+
+    注意：与 harness.checkpoint.WorkflowContext 同名但用途不同。
+    本类是轻量 dataclass，用于 Agent 间数据流；
+    harness 的 WorkflowContext 是重载类，用于持久化断点续传。
+    """
     creative_idea: str
     script_format: str
     outline: str = ""                        # 全局大纲
@@ -653,6 +711,7 @@ def build_writer_prompt(
     memory_snapshot: str,
     previous_script: Optional[str] = None,
     user_feedback: Optional[str] = None,
+    harness_memory_context: str = "",
 ) -> str:
     """
     根据剧本格式构建编剧 Prompt。
@@ -661,6 +720,7 @@ def build_writer_prompt(
     Args:
         previous_script: 如果存在用户修改意见，此为之前的初稿剧本
         user_feedback: 用户的定向修改意见
+        harness_memory_context: Harness 结构化记忆注入（可选，不影响现有流程）
     """
     # 定向精修分支：用户提交了针对本集剧本的修改意见
     if previous_script and user_feedback:
@@ -701,6 +761,16 @@ def build_writer_prompt(
     suffix = strategy.get("writer_suffix", "")
     if suffix:
         base = base + "\n" + suffix
+
+    # Harness 结构化记忆注入（零侵入：无值时不追加任何内容）
+    if harness_memory_context:
+        base = base + "\n\n" + harness_memory_context
+
+    # P3-2：内容安全护栏注入
+    base = base + "\n\n" + _get_safety_guardrail_text()
+
+    # Harness 工具 Schema 注入（自动获取标准 Writer 工具集）
+    base = _inject_tool_schema_if_available(base, "writer")
 
     return base
 
@@ -916,6 +986,15 @@ def build_doctor_prompt(
     suffix = strategy.get("doctor_suffix", "")
     if suffix:
         base = base + "\n" + suffix
+
+    # P3-3：对抗性审查增强
+    base = base + "\n\n" + _get_adversarial_review_text()
+
+    # P3-2：内容安全护栏注入
+    base = base + "\n\n" + _get_safety_guardrail_text()
+
+    # Harness 工具 Schema 注入
+    base = _inject_tool_schema_if_available(base, "doctor")
 
     return base
 
@@ -1148,6 +1227,7 @@ def run_episode_writer_agent(
     callback: LogCallback,
     previous_script: Optional[str] = None,
     user_feedback: Optional[str] = None,
+    harness_memory_context: str = "",
 ) -> AgentResult:
     """
     执行执行编剧 Agent - 撰写指定集数的完整剧本。
@@ -1155,6 +1235,7 @@ def run_episode_writer_agent(
     Args:
         previous_script: 之前的初稿剧本（用于定向精修）
         user_feedback: 用户的定向修改意见
+        harness_memory_context: Harness 结构化记忆注入（可选）
     """
     is_revision = bool(previous_script and user_feedback)
 
@@ -1174,6 +1255,7 @@ def run_episode_writer_agent(
         memory_snapshot=memory_snapshot,
         previous_script=previous_script,
         user_feedback=user_feedback,
+        harness_memory_context=harness_memory_context,
     )
 
     if is_revision:
@@ -1341,7 +1423,10 @@ def run_scripts_phase(
     outline: str,
     total_episodes: int,
     log_callback: Callable[[str, str], None],
-    progress_callback: Optional[Callable[[str, str, int, int], None]] = None
+    progress_callback: Optional[Callable[[str, str, int, int], None]] = None,
+    memory_store: Optional["StructuredMemoryStore"] = None,
+    checkpoint_manager: Optional["CheckpointManager"] = None,
+    context_retriever: Optional["ContextRetriever"] = None,
 ) -> WorkflowContext:
     """
     阶段二：用户审核大纲后，按集数循环生成剧本。
@@ -1356,6 +1441,9 @@ def run_scripts_phase(
         total_episodes: 总集数
         log_callback: 日志回调
         progress_callback: 进度回调
+        memory_store: Harness 结构化记忆（可选，None=不启用）
+        checkpoint_manager: Harness 断点管理（可选，None=不启用）
+        context_retriever: JIT 上下文检索器（可选，None=使用全量上下文）
     """
     context = WorkflowContext(
         creative_idea=creative_idea,
@@ -1365,9 +1453,17 @@ def run_scripts_phase(
     )
     callback = LogCallback(log_callback)
 
+    # Harness 内存记初始化日志（可选）
+    _use_harness = memory_store is not None
+    _use_jit = context_retriever is not None
+
     mode_tag = "🔥 多巴胺" if is_micro_drama_mode(script_format) else ""
     callback.info(f"🚀 阶段二启动：批量生成 {total_episodes} 集剧本（{mode_tag}版）")
     callback.log(f"[系统] 当前正在使用的 API 模型为：{model}", "system")
+    if _use_harness:
+        callback.info("🧠 Harness 结构化记忆已启用，长剧上下文一致性增强中...")
+    if _use_jit:
+        callback.info(f"⚡ JIT 上下文检索已启用（预期 token 消耗降低 40-60%）")
 
     callback.stage("系统", f"阶段 2/2：按集数循环生成剧本（共 {total_episodes} 集，{mode_tag}版）")
 
@@ -1375,33 +1471,88 @@ def run_scripts_phase(
     previous_summary = ""
     final_episode_scripts: List[str] = []
 
+    # JIT 优化：将全量 outline_summary 替换为逐集精简版
+    _base_outline = outline_summary
+    _base_char_settings = context.character_settings
+
     for episode_num in range(1, total_episodes + 1):
         context.current_episode_index = episode_num
         context.retry_count = 0
         episode_approved = False
+        doctor_feedback = None   # P1修复：跨 retry 传递医生反馈
+        writer_prev = None       # 用于 retry 时将上一版剧本传给 Writer 精修
 
         callback.episode(episode_num, f"开始生成第 {episode_num}/{total_episodes} 集...")
         callback.info("")
 
+        # === JIT 上下文检索：按集构建精简版 outline_summary + character_settings ===
+        _ep_outline = _base_outline
+        _ep_char_settings = _base_char_settings
+        _ep_prev_summary = previous_summary
+        if _use_jit and episode_num > 1:
+            try:
+                jit_bundle = context_retriever.retrieve(episode_num)
+                if jit_bundle.episode_outline:
+                    _ep_outline = jit_bundle.episode_outline
+                if jit_bundle.character_context:
+                    _ep_char_settings = jit_bundle.character_context
+                if jit_bundle.recent_summaries:
+                    _ep_prev_summary = jit_bundle.recent_summaries
+                callback.info(f"⚡ JIT 上下文：{jit_bundle.estimated_tokens()} tokens（vs 全量约 {len(_base_outline)//2} tokens）")
+            except Exception:
+                pass  # JIT 失败不阻塞，使用全量上下文
+
+        # === Harness：构建结构化记忆上下文（第2集起注入）===
+        harness_memory_context = ""
+        if _use_harness and episode_num > 1:
+            try:
+                harness_memory_context = memory_store.build_writer_context_snippet(
+                    current_episode=episode_num,
+                    recent_episodes=5,
+                )
+                if harness_memory_context:
+                    callback.info(f"🧠 已注入结构化记忆（角色×{memory_store.stats['characters']}，"
+                                  f"伏线×{memory_store.stats['plot_threads_active']}活跃）")
+            except Exception:
+                pass  # 记忆注入失败不阻塞
+
         while not episode_approved and context.retry_count < 3:
 
-            # 编剧 Agent
+            # === P3-1：Token 预算追踪 ===
+            try:
+                from harness.termination import BudgetTracker
+                _budget = BudgetTracker(episode_num=episode_num, max_rounds=10)
+                _budget.record_writer_call(
+                    len(harness_memory_context or "") // 2 + len(_ep_outline) // 2,
+                    0  # output 在 writer_result 后更新
+                )
+            except ImportError:
+                _budget = None
+
+            # 编剧 Agent（注入 Harness 记忆 + 医生反馈 + JIT 上下文优化）
             writer_result = run_episode_writer_agent(
                 client=client,
                 model=model,
                 episode_num=episode_num,
                 total_episodes=total_episodes,
-                outline_summary=outline_summary,
-                character_settings=context.character_settings,
-                previous_summary=previous_summary,
+                outline_summary=_ep_outline,
+                character_settings=_ep_char_settings,
+                previous_summary=_ep_prev_summary,
                 memory_snapshot=context.memory_snapshot,
                 script_format=script_format,
-                callback=callback
+                callback=callback,
+                previous_script=writer_prev if doctor_feedback else None,
+                user_feedback=doctor_feedback,
+                harness_memory_context=harness_memory_context,
             )
 
             if not writer_result.success:
                 callback.error(f"❌ 第 {episode_num} 集编剧失败，跳过")
                 break
+
+            # P3-1：更新预算追踪（Writer output）
+            if _budget:
+                _budget.record_writer_call(0, len(writer_result.content) // 2)
 
             # 医生 Agent 审核
             doctor_result = run_episode_doctor_agent(
@@ -1410,7 +1561,7 @@ def run_scripts_phase(
                 episode_num=episode_num,
                 total_episodes=total_episodes,
                 episode_content=writer_result.content,
-                outline_summary=outline_summary,
+                outline_summary=_ep_outline,
                 script_format=script_format,
                 callback=callback
             )
@@ -1418,6 +1569,13 @@ def run_scripts_phase(
             if not doctor_result.success:
                 callback.error(f"❌ 第 {episode_num} 集医生审核失败，跳过")
                 break
+
+            # P3-1：更新预算追踪（Doctor call）
+            if _budget:
+                _budget.record_doctor_call(
+                    len(writer_result.content) // 2 + 500,  # prompt estimate
+                    len(doctor_result.content) // 2
+                )
 
             if is_approved(doctor_result.content):
                 episode_approved = True
@@ -1428,7 +1586,36 @@ def run_scripts_phase(
 
                 final_episode_scripts.append(writer_result.content)
                 context.episode_scripts = final_episode_scripts
-                previous_summary = get_episode_summary(writer_result.content)
+                current_summary = get_episode_summary(writer_result.content)
+                previous_summary = current_summary
+
+                # === JIT：记录本集摘要供后续检索 ===
+                if _use_jit and current_summary:
+                    try:
+                        context_retriever.record_episode(episode_num, current_summary)
+                    except Exception:
+                        pass
+
+                # === Harness：更新结构化记忆 ===
+                if _use_harness and current_summary:
+                    try:
+                        memory_store.update_episode_index(episode_num, current_summary)
+                        # 从文本快照中提取角色信息（简单启发式）
+                        _harness_update_characters_from_snapshot(
+                            memory_store, checkpoint, episode_num
+                        )
+                    except Exception:
+                        pass
+
+                # === Harness：自动保存断点 ===
+                if checkpoint_manager is not None:
+                    try:
+                        checkpoint_manager.auto_save_if_needed(
+                            current_episode=episode_num,
+                            prefix="creator_",
+                        )
+                    except Exception:
+                        pass
 
                 # 实时追加到 UI 剧本正文
                 if progress_callback:
@@ -1438,15 +1625,68 @@ def run_scripts_phase(
                         episode_num,
                         total_episodes
                     )
+
+                # P3-1：预算摘要
+                if _budget:
+                    callback.info(f"💰 预算：{_budget.summary()}")
             else:
                 context.retry_count += 1
                 if context.retry_count < 3:
                     callback.warning(f"🔄 第 {episode_num} 集需重写（第 {context.retry_count}/3 次）")
-                    callback.info("   医生反馈将在下一轮传给编剧 Agent...")
+                    # P1修复：实际传递医生反馈给 Writer，而不是只打日志
+                    doctor_feedback = doctor_result.content
+                    callback.info(f"   已提取医生反馈（{len(doctor_feedback)}字符），下一轮传给编剧精修")
+                    # 保存本轮被驳回的剧本，作为精修起点
+                    writer_prev = writer_result.content
                 else:
+                    # P1修复：强制通过的集也要走完整的 Harness 更新流程
                     callback.error(f"❌ 第 {episode_num} 集重写次数超限，保留当前版本")
                     final_episode_scripts.append(writer_result.content)
                     context.episode_scripts = final_episode_scripts
+                    current_summary = get_episode_summary(writer_result.content)
+                    previous_summary = current_summary
+
+                    # === JIT：记录本集摘要（强制通过也要记录）===
+                    if _use_jit and current_summary:
+                        try:
+                            context_retriever.record_episode(episode_num, current_summary)
+                        except Exception:
+                            pass
+
+                    # 提取医生最后一次审核的记忆快照
+                    checkpoint = extract_memory_checkpoint(doctor_result.content)
+                    if checkpoint:
+                        context.memory_snapshot = checkpoint
+
+                    # === Harness：强制通过也要更新结构化记忆 ===
+                    if _use_harness and current_summary:
+                        try:
+                            memory_store.update_episode_index(episode_num, current_summary)
+                            _harness_update_characters_from_snapshot(
+                                memory_store, checkpoint, episode_num
+                            )
+                        except Exception:
+                            pass
+
+                    # === Harness：强制通过也要保存断点 ===
+                    if checkpoint_manager is not None:
+                        try:
+                            checkpoint_manager.auto_save_if_needed(
+                                current_episode=episode_num,
+                                prefix="creator_",
+                            )
+                        except Exception:
+                            pass
+
+                    # 强制通过也要追加到 UI 剧本正文
+                    if progress_callback:
+                        progress_callback(
+                            "script_episode",
+                            writer_result.content,
+                            episode_num,
+                            total_episodes
+                        )
+
                     episode_approved = True
 
         if progress_callback:
@@ -1585,6 +1825,8 @@ def run_episode_revision_phase(
     user_feedback: str,
     log_callback: Callable[[str, str], None],
     progress_callback: Optional[Callable[[str, str, int, int], None]] = None,
+    memory_store: Optional["StructuredMemoryStore"] = None,
+    checkpoint_manager: Optional["CheckpointManager"] = None,
 ) -> WorkflowContext:
     """
     定向精修阶段（单集剧本）：用户对某集剧本提交修改意见后，
@@ -1622,6 +1864,17 @@ def run_episode_revision_phase(
     callback.info(f"   修改意见：{user_feedback[:80]}...")
     callback.info("")
 
+    # === Harness：定向精修也注入结构化记忆 ===
+    harness_memory_context = ""
+    if memory_store is not None and episode_num > 1:
+        try:
+            harness_memory_context = memory_store.build_writer_context_snippet(
+                current_episode=episode_num,
+                recent_episodes=3,
+            )
+        except Exception:
+            pass
+
     # 第一步：编剧 Agent 定向精修
     callback.episode(episode_num, "🎯 编剧正在根据意见精修...")
     writer_result = run_episode_writer_agent(
@@ -1637,6 +1890,7 @@ def run_episode_revision_phase(
         callback=callback,
         previous_script=previous_script,
         user_feedback=user_feedback,
+        harness_memory_context=harness_memory_context,
     )
 
     if not writer_result.success:
@@ -1667,6 +1921,26 @@ def run_episode_revision_phase(
         checkpoint = extract_memory_checkpoint(doctor_result.content)
         if checkpoint:
             context.memory_snapshot = checkpoint
+
+        # === Harness：定向精修后更新结构化记忆 ===
+        current_summary = get_episode_summary(writer_result.content)
+        if memory_store is not None and current_summary:
+            try:
+                memory_store.update_episode_index(episode_num, current_summary)
+                _harness_update_characters_from_snapshot(
+                    memory_store, checkpoint, episode_num
+                )
+            except Exception:
+                pass
+        if checkpoint_manager is not None:
+            try:
+                checkpoint_manager.auto_save_if_needed(
+                    current_episode=episode_num,
+                    prefix="creator_",
+                )
+            except Exception:
+                pass
+
         if progress_callback:
             progress_callback(
                 "episode_revised_ok",
@@ -1688,13 +1962,123 @@ def run_episode_revision_phase(
 
     return context
 
+
+# =============================================================================
+# Harness 辅助函数
+# =============================================================================
+
+def _harness_update_characters_from_snapshot(
+    memory_store: "StructuredMemoryStore",
+    memory_snapshot: str,
+    episode_num: int,
+):
+    """
+    从 Doctor 记忆快照中提取角色信息，更新结构化记忆。
+
+    采用启发式提取，兼容两种格式：
+    1. 【角色当前状态】段落 + "角色名：状态" 模式（标准 Doctor 输出）
+    2. **本集摘要** 行模式（兼容 Markdown 格式）
+
+    容错设计：
+    - 即使提取不完整也不影响创作（记忆注入是补充性的）
+    - 所有异常静默处理，不回滚已成功的提取
+    - 不同模型输出格式差异大，regex 仅匹配已知模式
+
+    注意：如果 Doctor prompt 格式变更，此处的 regex 需要同步更新。
+    """
+    if not memory_snapshot or not memory_store:
+        return
+
+    import re
+    extracted_any = False
+
+    # 策略1：精确匹配【角色当前状态】段落（标准 Doctor 输出）
+    char_section_match = re.search(
+        r'【角色当前状态】(.*?)(?:【|(?:\n\n))',
+        memory_snapshot, re.DOTALL
+    )
+    if char_section_match:
+        char_text = char_section_match.group(1)
+        for match in re.finditer(r'[【\s]*(\S{1,8})[：:](.*?)(?=\n[【\s]*\S{1,8}[：:]|\n\n|$)', char_text, re.DOTALL):
+            name = match.group(1).strip()
+            detail = match.group(2).strip()
+            if not name or len(name) > 8:
+                continue
+            try:
+                char = memory_store.get_or_create_character(name)
+                char.current_emotion = detail[:60]
+                char.key_events.append(f"第{episode_num}集：{detail[:40]}")
+                memory_store.update_character(char, episode=episode_num)
+                extracted_any = True
+            except Exception:
+                pass
+
+    # 策略2：宽松 fallback — 匹配 Markdown 的 **角色名**：状态 格式
+    if not extracted_any and '角色' in memory_snapshot:
+        for match in re.finditer(
+            r'\*\*(\S{1,8})\*\*[：:]\s*(.*?)(?:\n|$)',
+            memory_snapshot
+        ):
+            name = match.group(1).strip()
+            detail = match.group(2).strip()
+            if not name or len(name) > 8:
+                continue
+            # 排除非角色词（章节、标题等）
+            skip_words = {'本集', '上一集', '下一集', '摘要', '要点', '大纲', '注意'}
+            if name in skip_words:
+                continue
+            try:
+                char = memory_store.get_or_create_character(name)
+                if not char.current_emotion or char.current_emotion == "未知":
+                    char.current_emotion = detail[:60]
+                char.key_events.append(f"第{episode_num}集：{detail[:40]}")
+                memory_store.update_character(char, episode=episode_num)
+                extracted_any = True
+            except Exception:
+                pass
+
+    # 提取【本集摘要】（兼容两种格式）
+    for pattern in [
+        r'\*\*本集摘要\*\*[：:]\s*(.*?)(?:\n|$)',
+        r'【本集摘要】[：:]\s*(.*?)(?:\n|$)',
+    ]:
+        summary_match = re.search(pattern, memory_snapshot)
+        if summary_match:
+            summary = summary_match.group(1).strip()
+            if summary:
+                try:
+                    memory_store.update_episode_index(episode_num, summary)
+                except Exception:
+                    pass
+            break
+
+
+# =============================================================================
+# 工具 Schema 注入辅助函数
+# =============================================================================
+
+def _inject_tool_schema_if_available(base_prompt: str, agent: str) -> str:
+    """如果 Harness tool_schema 模块可用，注入对应 Agent 的工具声明。"""
+    try:
+        from harness.tool_schema import create_default_registry
+        registry = create_default_registry()
+        tool_text = registry.format_for(agent)
+        if tool_text:
+            return base_prompt + "\n\n" + tool_text
+    except ImportError:
+        pass
+    return base_prompt
+
+
 def run_writer_studio(
     client: OpenAI,
     model: str,
     creative_idea: str,
     script_format: str,
     log_callback: Callable[[str, str], None],
-    progress_callback: Optional[Callable[[str, str, int, int], None]] = None
+    progress_callback: Optional[Callable[[str, str, int, int], None]] = None,
+    memory_store: Optional["StructuredMemoryStore"] = None,
+    checkpoint_manager: Optional["CheckpointManager"] = None,
 ) -> WorkflowContext:
     """
     兼容旧接口：一键运行完整流程（架构师→编剧→医生）。
@@ -1708,11 +2092,13 @@ def run_writer_studio(
     if not context.outline:
         return context
 
-    # 阶段二
+    # 阶段二（传递 Harness 组件）
     return run_scripts_phase(
         client, model, creative_idea, script_format,
         context.outline, context.total_episodes,
-        log_callback, progress_callback
+        log_callback, progress_callback,
+        memory_store=memory_store,
+        checkpoint_manager=checkpoint_manager,
     )
 
 
@@ -1723,12 +2109,16 @@ def run_workflow(
     creative_idea: str,
     script_format: str,
     log_callback: Callable[[str, str], None],
-    progress_callback: Optional[Callable[[str, str, int, int], None]] = None
+    progress_callback: Optional[Callable[[str, str, int, int], None]] = None,
+    memory_store: Optional["StructuredMemoryStore"] = None,
+    checkpoint_manager: Optional["CheckpointManager"] = None,
 ) -> WorkflowContext:
     """便捷入口函数"""
     client = OpenAI(base_url=base_url, api_key=api_key)
     return run_writer_studio(
         client=client, model=model,
         creative_idea=creative_idea, script_format=script_format,
-        log_callback=log_callback, progress_callback=progress_callback
+        log_callback=log_callback, progress_callback=progress_callback,
+        memory_store=memory_store,
+        checkpoint_manager=checkpoint_manager,
     )
