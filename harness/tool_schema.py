@@ -140,6 +140,35 @@ WRITER_TOOLS = [
         required=["character_name"],
         examples=["query_character_state('男主') → 返回男主的当前情绪/目标/关系状态"],
     ),
+    # v2.0：外部剧本数据库工具（用户提出的"记忆函数"）
+    ToolSchema(
+        name="get_character_profile",
+        description="【外部数据库】查询角色的完整档案：外貌、性格、习惯、当前状态、历史事件。每次让角色出场前必须先调用此工具获取准确状态，避免细节漂移。",
+        parameters={"name": "string"},
+        required=["name"],
+        examples=["get_character_profile('钱阿龙') → 返回完整档案含位置/情绪/关系/伤口/秘密"],
+    ),
+    ToolSchema(
+        name="get_current_timeline",
+        description="【外部数据库】获取当前场景的准确时间、地点、在场人物和关键事实。确保伏笔连贯和因果链完整。",
+        parameters={"episode": "int", "scene_number": "int"},
+        required=["episode"],
+        examples=["get_current_timeline(8, 3) → 返回第8集第3场的时间地点人物事实"],
+    ),
+    ToolSchema(
+        name="get_previous_scenes",
+        description="【外部数据库】获取前N场戏的摘要和关键事实，用于连贯性检查和情绪衔接。",
+        parameters={"episode": "int", "n": "int"},
+        required=["episode"],
+        examples=["get_previous_scenes(8, 5) → 返回第8集之前最近5场戏的摘要"],
+    ),
+    ToolSchema(
+        name="get_outline_beats",
+        description="【外部数据库】获取本集必须完成的剧情点清单（情绪点/情节点/钩子点）。确保不遗漏关键剧情。",
+        parameters={"episode": "int"},
+        required=["episode"],
+        examples=["get_outline_beats(8) → 返回第8集还剩3个节拍待完成"],
+    ),
     ToolSchema(
         name="save_script_draft",
         description="保存当前集剧本草稿供后续审核",
@@ -194,6 +223,21 @@ DOCTOR_TOOLS = [
         },
         required=["episode_summary"],
     ),
+    # v2.0：一致性检查工具
+    ToolSchema(
+        name="check_consistency",
+        description="【代码层工具】用确定性逻辑扫描剧本片段，检测已知矛盾：角色生死/时间线顺序/道具归属/关系冲突。检测结果自动注入审核上下文。",
+        parameters={"episode": "int", "script_segment": "string"},
+        required=["episode"],
+        examples=["check_consistency(8, 第8集剧本) → 返回一致性检查报告（死人复活/年龄矛盾等）"],
+    ),
+    ToolSchema(
+        name="add_scene_fact",
+        description="【外部数据库】记录本场戏写入的新事实（如'钥匙藏在花盆下'、'主角获得唐人街地址'），供后续集数引用。",
+        parameters={"episode": "int", "scene_number": "int", "facts": "string"},
+        required=["episode", "facts"],
+        examples=['add_scene_fact(8, 3, "信封里装着唐人街地址") → 更新事实数据库'],
+    ),
 ]
 
 # --- Showrunner Agent 工具集 ---
@@ -234,6 +278,19 @@ SHOWRUNNER_TOOLS = [
             "episode_range": "string",
             "hints": "string",
         },
+    ),
+    # v2.0：大纲节拍结构化工具
+    ToolSchema(
+        name="define_episode_beats",
+        description="【结构化大纲】为每集定义必须完成的剧情节拍清单（核心情绪点/解决方式/尾部钩子），供 Writer 逐集对照。",
+        parameters={
+            "episode": "int",
+            "emotion_beat": "string",
+            "plot_beat": "string",
+            "hook_beat": "string",
+        },
+        required=["episode"],
+        examples=['define_episode_beats(8, "主角被羞辱", "掏出证据打脸", "门后出现神秘人")'],
     ),
 ]
 

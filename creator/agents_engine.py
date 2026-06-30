@@ -8,7 +8,13 @@ Multi-Agent Collaboration Engine for AI Screenwriter Studio
 2. Writer Agent (执行编剧) - 按集循环撰写完整剧本
 3. Doctor Agent (剧本医生) - QA 审查与集数级记忆快照
 
-版本: 0.6.0 (Phase 6 - Dynamic Model Selection + HITL Targeted Revision)
+v2.0 新增 — 外部剧本数据库（长剧本一致性系统）：
+- Showrunner 后：自动解析大纲 → BeatOutline（分集节拍追踪）
+- Writer 后：自动更新 SceneTimeline（场景时间线数据库）
+- Doctor 前：自动运行 ConsistencyChecker（逻辑一致性检查）
+- 三大模块全部通过 StructuredMemoryStore 统一管理
+
+版本: 0.7.0 (Phase 7 - External Script Database for Long-Form Consistency)
 """
 
 from openai import OpenAI
@@ -21,6 +27,8 @@ if TYPE_CHECKING:
     from harness.memory_store import StructuredMemoryStore
     from harness.checkpoint import CheckpointManager
     from harness.context_retriever import ContextRetriever
+    from shared.scene_timeline import SceneTimeline
+    from shared.beat_outline import BeatOutline
 
 
 # =============================================================================
@@ -958,16 +966,45 @@ _DOCTOR_DOPAMINE_PROMPT = """你是一位严格的剧本医生和场记，专门
 ```
 """
 
+def _get_preflight_section(preflight_report_text: str, episode_content: str = "") -> str:
+    """
+    构建预扫描结果注入段落（v0.3 优化）。
+    将代码层的违规扫描/台词统计/情绪指标结果注入 Doctor prompt，
+    Doctor 角色从"逐行寻找违规"变为"基于代码证据做语义确认"。
+    """
+    lines = [
+        "",
+        "## 🔬 代码层预扫描结果（已由程序自动完成，无需你重复查找）",
+        "",
+        "以下违规由正则/字符串算法预扫描。你的任务是：",
+        "1. 逐条确认——它们是否真的是违规（代码可能误判）",
+        "2. 判断是否遗漏——代码没找到但实际存在的违规",
+        "3. 从语义层面评估——节奏/张力/情绪质量（这些代码做不了）",
+        "",
+        preflight_report_text,
+    ]
+    if episode_content:
+        lines.append(f"\n## 剧本原文（本集）\n{episode_content[:3000]}")
+
+    return "\n".join(lines)
+
+
 def build_doctor_prompt(
     script_format: str,
     episode_num: int,
     total_episodes: int,
     outline_summary: str,
     episode_summary: str,
+    episode_content: str = "",
+    preflight_report_text: str = "",
 ) -> str:
     """
     根据剧本格式构建医生 Prompt。
     竖屏微短剧模式注入多巴胺爽剧审核规则。
+
+    v0.3 优化：支持注入代码层预扫描报告（preflight_report_text）。
+    当提供预扫描报告时，Doctor 从"肉眼扫描"模式切换为"基于代码证据的语义确认"模式，
+    大幅降低 token 消耗并提升准确度。
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     next_episode = episode_num + 1
@@ -992,6 +1029,10 @@ def build_doctor_prompt(
 
     # P3-2：内容安全护栏注入
     base = base + "\n\n" + _get_safety_guardrail_text()
+
+    # v0.3：代码层预扫描报告注入（代替 LLM "肉眼扫描"）
+    if preflight_report_text:
+        base = base + "\n\n" + _get_preflight_section(preflight_report_text, episode_content)
 
     # Harness 工具 Schema 注入
     base = _inject_tool_schema_if_available(base, "doctor")
@@ -1303,12 +1344,42 @@ def run_episode_doctor_agent(
     episode_content: str,
     outline_summary: str,
     script_format: str,
-    callback: LogCallback
+    callback: LogCallback,
+    consistency_report: str = "",        # v2.0：代码层一致性预扫描报告
+    harness_doctor_context: str = "",     # v2.0：Harness Doctor 上下文
 ) -> AgentResult:
     """
     执行剧本医生 Agent - 审查指定集数的剧本。
+
+    v0.3 优化：自动运行代码层预扫描，将违规命中结果注入 Doctor prompt，
+    使 Doctor 从"肉眼扫描"模式切换为"代码证据语义确认"模式。
+
+    v2.0 新增：consistency_report（逻辑一致性预扫描） + harness_doctor_context（结构化记忆）
     """
     callback.agent("医生", f"正在审核第 {episode_num}/{total_episodes} 集...")
+
+    # v0.3：代码层预扫描（在 LLM 调用前完成所有"计数+查找"工作）
+    preflight_text = ""
+    try:
+        from shared.script_preprocessor import generate_preflight_report
+        report = generate_preflight_report(episode_content, max_dialogue_chars=15)
+        preflight_text = report.to_injection_text()
+    except Exception:
+        pass  # 预扫描失败不阻塞，Doctor 回退到原始模式
+
+    # v2.0：拼接一致性检查报告
+    if consistency_report:
+        if preflight_text:
+            preflight_text = preflight_text + "\n\n" + consistency_report
+        else:
+            preflight_text = consistency_report
+
+    # v2.0：拼接 Harness Doctor 上下文
+    if harness_doctor_context:
+        if preflight_text:
+            preflight_text = preflight_text + "\n\n" + harness_doctor_context
+        else:
+            preflight_text = harness_doctor_context
 
     next_ep_note = f"第 {episode_num + 1} 集" if episode_num < total_episodes else "（大结局）"
 
@@ -1333,6 +1404,8 @@ def run_episode_doctor_agent(
             total_episodes=total_episodes,
             outline_summary=outline_summary,
             episode_summary=get_episode_summary(episode_content),
+            episode_content=episode_content,
+            preflight_report_text=preflight_text,
         ),
         user_prompt=user_prompt,
         temperature=0.3,
@@ -1403,6 +1476,17 @@ def run_showrunner_phase(
 
     callback.success(f"🎯 识别到 [总集数: {context.total_episodes}]")
     callback.info(f"   大纲已生成，等待用户审核...")
+
+    # v2.0：自动从大纲解析节拍 → BeatOutline（如果 memory_store 可用）
+    try:
+        from shared.beat_outline import BeatOutline
+        beat_outline = BeatOutline(project_id=creative_idea[:30])
+        parsed_count = beat_outline.parse_from_showrunner_output(outline_result.content)
+        if parsed_count > 0:
+            callback.info(f"📋 自动解析节拍：{parsed_count}个剧情节拍已录入大纲追踪器")
+            beat_outline.save()
+    except Exception:
+        pass  # 节拍解析失败不阻塞
 
     # 更新 UI 大纲区域
     if progress_callback:
@@ -1554,6 +1638,24 @@ def run_scripts_phase(
             if _budget:
                 _budget.record_writer_call(0, len(writer_result.content) // 2)
 
+            # v2.0：代码层一致性预扫描（Writer 完成后、Doctor 审核前）
+            _consistency_report = ""
+            if _use_harness and episode_num > 1:
+                try:
+                    issues = memory_store.run_consistency_check(
+                        current_episode=episode_num,
+                        new_content=writer_result.content,
+                    )
+                    if issues:
+                        checker = memory_store.get_consistency_checker()
+                        _consistency_report = checker.format_report(issues)
+                        stats = checker.get_summary_stats(issues)
+                        if stats["critical"] > 0:
+                            callback.warning(f"🔍 一致性检查：发现 {stats['critical']} 个严重矛盾，"
+                                             f"{stats['major']} 个建议修复")
+                except Exception:
+                    pass  # 一致性检查失败不阻塞
+
             # 医生 Agent 审核
             doctor_result = run_episode_doctor_agent(
                 client=client,
@@ -1563,7 +1665,13 @@ def run_scripts_phase(
                 episode_content=writer_result.content,
                 outline_summary=_ep_outline,
                 script_format=script_format,
-                callback=callback
+                callback=callback,
+                consistency_report=_consistency_report,      # v2.0
+                harness_doctor_context=(                     # v2.0
+                    memory_store.build_doctor_check_context(
+                        episode_num, writer_result.content
+                    ) if _use_harness else ""
+                ),
             )
 
             if not doctor_result.success:
@@ -1604,6 +1712,21 @@ def run_scripts_phase(
                         _harness_update_characters_from_snapshot(
                             memory_store, checkpoint, episode_num
                         )
+                    except Exception:
+                        pass
+
+                # === v2.0：更新场景时间线 + 标记节拍完成 ===
+                if _use_harness:
+                    try:
+                        # 场景时间线：自动为该集的每个场景创建记录
+                        _update_scene_timeline(
+                            memory_store, episode_num, writer_result.content
+                        )
+                        # 节拍追踪：标记本集所有节拍为完成
+                        if memory_store.beat_outline:
+                            memory_store.beat_outline.mark_all_done(episode_num)
+                            bs = memory_store.beat_outline.stats
+                            callback.info(f"📋 节拍追踪：{bs['completed_beats']}/{bs['total_beats']} 已完成 ({bs['completion_rate']})")
                     except Exception:
                         pass
 
@@ -1741,6 +1864,132 @@ def run_scripts_phase(
     callback.success(f"   生成集数：{total_episodes} 集")
 
     return context
+
+
+# =============================================================================
+# v2.0：场景时间线更新辅助函数
+# =============================================================================
+
+def _update_scene_timeline(
+    memory_store: "StructuredMemoryStore",
+    episode_num: int,
+    episode_content: str,
+):
+    """从新生成的剧本中自动提取场景信息，更新 SceneTimeline。
+
+    扫描剧本中的「【场景：...】」或「第N场」标记，
+    为每个场景创建 SceneRecord 并记录关键事实。
+    """
+    if memory_store.scene_timeline is None:
+        try:
+            from shared.scene_timeline import SceneTimeline, SceneRecord
+            memory_store.scene_timeline = SceneTimeline(
+                project_id=memory_store.project_id
+            )
+        except Exception:
+            return
+
+    tl = memory_store.scene_timeline
+
+    # 检测场景标记
+    # 格式1：【场景：地点/时间】
+    # 格式2：第X场
+    scene_markers = list(re.finditer(
+        r'(?:【场景[：:]?\s*([^】/]+)(?:[／/]\s*([^】]+))?】)|'
+        r'(?:第\s*([一二三四五六七八九十\d]+)\s*场)',
+        episode_content
+    ))
+
+    if not scene_markers:
+        # 没有场景标记，创建一个默认场景记录
+        rec_id = f"e{episode_num}_s1"
+        rec = _build_scene_record(
+            rec_id, episode_num, 1, episode_content, ["全文"]
+        )
+        tl.add_scene(rec)
+        return
+
+    # 按位置切分剧本为各场景
+    scene_texts = []
+    for i, m in enumerate(scene_markers):
+        start = m.start()
+        end = scene_markers[i + 1].start() if i + 1 < len(scene_markers) else len(episode_content)
+        scene_texts.append(episode_content[start:end])
+
+    for i, (match, text) in enumerate(zip(scene_markers, scene_texts)):
+        scene_num = i + 1
+        rec_id = f"e{episode_num}_s{scene_num}"
+
+        # 提取地点和时间
+        location = ""
+        time_of_day = ""
+        if match.group(1):  # 格式1的 地点
+            location = match.group(1).strip()
+            if match.group(2):
+                time_of_day = match.group(2).strip()
+
+        rec = _build_scene_record(rec_id, episode_num, scene_num, text, [location, time_of_day])
+        tl.add_scene(rec)
+
+    tl.save()
+
+
+def _build_scene_record(
+    rec_id: str,
+    episode: int,
+    scene_num: int,
+    text: str,
+    location_parts: list,
+):
+    """构建单个 SceneRecord"""
+    from shared.scene_timeline import SceneRecord
+
+    rec = SceneRecord(
+        scene_id=rec_id,
+        episode=episode,
+        scene_number=scene_num,
+    )
+
+    # 地点
+    location = next((p for p in location_parts if p and p != "全文"), "")
+    rec.location = location
+
+    # 位置类型判断
+    if any(w in (location or "") for w in ["内", "室", "厅", "房", "屋"]):
+        rec.location_type = "内景"
+    elif any(w in (location or "") for w in ["外", "街", "林", "野", "山", "海"]):
+        rec.location_type = "外景"
+
+    # 时间
+    time_pattern = re.search(
+        r'(?:时间[：:]?\s*)?(深夜|清晨|上午|下午|傍晚|黄昏|夜晚|午夜|凌晨|白天|午后)',
+        text[:200]
+    )
+    if time_pattern:
+        rec.time_of_day = time_pattern.group(1)
+
+    # 出场角色（从台词中提取）
+    char_matches = re.findall(r'([\u4e00-\u9fa5A-Za-z0-9]{2,6})[：:](?![""「」『』])', text)
+    rec.characters_present = list(dict.fromkeys(char_matches))[:8]  # 去重，最多8个
+
+    # 摘要
+    rec.summary = text[:150].replace('\n', ' ').strip()
+
+    # 关键事实（从摘要中提取包含关键动词的句子）
+    fact_patterns = [
+        r'(?:发现|获得|失去|收到|藏|埋|拿出|递给|交给|留下|带走)([\u4e00-\u9fa5]{3,30})',
+        r'([\u4e00-\u9fa5]{3,20})(?:被|在|从)(?:发现|获得|拿走|偷走)',
+    ]
+    for pat in fact_patterns:
+        for fm in re.finditer(pat, text[:500]):
+            fact = fm.group(0)[:40]
+            if fact not in rec.key_facts:
+                rec.key_facts.append(fact)
+
+    # 字数
+    rec.word_count = len(text)
+
+    return rec
 
 
 # =============================================================================
@@ -1899,6 +2148,18 @@ def run_episode_revision_phase(
 
     # 第二步：医生 Agent 强制审核（绝不能跳过！）
     callback.episode(episode_num, "🔍 医生正在审核精修结果...")
+
+    # v2.0：精修版也运行一致性检查
+    _revision_consistency = ""
+    if memory_store is not None and episode_num > 1:
+        try:
+            issues = memory_store.run_consistency_check(episode_num, writer_result.content)
+            if issues:
+                checker = memory_store.get_consistency_checker()
+                _revision_consistency = checker.format_report(issues)
+        except Exception:
+            pass
+
     doctor_result = run_episode_doctor_agent(
         client=client,
         model=model,
@@ -1908,6 +2169,12 @@ def run_episode_revision_phase(
         outline_summary=outline_summary,
         script_format=script_format,
         callback=callback,
+        consistency_report=_revision_consistency,        # v2.0
+        harness_doctor_context=(                         # v2.0
+            memory_store.build_doctor_check_context(
+                episode_num, writer_result.content
+            ) if memory_store is not None else ""
+        ),
     )
 
     if not doctor_result.success:

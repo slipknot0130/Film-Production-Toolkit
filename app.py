@@ -268,19 +268,24 @@ with st.sidebar:
             }
 
             # ── 多选（可选多个基调叠加） ──
+            st.markdown("**🎨 视觉风格基调**（可选 · 不选则由AI自动分析剧本决定）")
             selected_tones = st.multiselect(
                 "选择视觉基调（可多选叠加）",
                 options=list(_VISUAL_TONES.keys()),
                 default=st.session_state.get("storyboard_tones", []),
                 key="storyboard_tones_select",
-                help="未选择时 LLM 将完全根据剧本内容自动推断视觉风格"
+                help="不选择任何基调时，AI 将完全根据剧本内容自动推断视觉风格。这是推荐方式。",
+                placeholder="留空 = AI自动分析剧本决定..."
             )
             st.session_state["storyboard_tones"] = selected_tones
 
-            # 显示选中基调的描述
+            # 显示选中基调的描述 或 自动模式提示
             if selected_tones:
                 for tone in selected_tones:
                     st.caption(f"**{tone}** — {_VISUAL_TONES[tone]['desc']}")
+            else:
+                st.success("🤖 自动模式：AI 会根据剧本内容自动推断最合适的视觉风格")
+
 
             # 生成 style_tokens_input：合并所有选中基调的 tokens
             if selected_tones:

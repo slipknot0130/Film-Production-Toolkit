@@ -13,12 +13,26 @@ production/analysis_engine.py — 制片流业务逻辑
 - 微短剧/短剧 → 情绪导向分析（多巴胺节奏 + 情绪爽感 + 台词冲击力）
 - 中剧/长剧 → 结构导向分析（起承转合 + 逻辑自洽 + 人物弧光 + 反转伏笔）
 - 电影长片 → 好莱坞工业分析（Save the Cat 15节拍 + Ghost/Lie/Flaw + McKee）
+
+v0.3 代码预扫描优化：
+所有"统计/搜索/计数/查找"任务改为 Python 正则+字符串算法执行，
+LLM 仅基于预扫描结果做语义级定性判断。
 """
 
 import streamlit as st
 
 from production.llm_utils import call_llm_json
 from shared.llm_config import detect_script_format_by_volume
+from shared.script_preprocessor import (  # v0.3 代码预扫描
+    generate_preflight_report,
+    count_scenes_code,
+    count_internal_external_scenes,
+    scan_writing_violations,
+    scan_dialogue_length,
+    extract_characters as code_extract_characters,
+    split_episodes,
+    scan_emotion_indicators,
+)
 
 
 # =============================================================================
@@ -71,7 +85,14 @@ def run_analysis_emotion_mode(text, client, model_name, kwargs):
     """
     情绪导向剧本医生：专为微短剧和短剧设计。
     核心审核标准：观众的情绪是否得到满足，而非绝对的逻辑正确。
+
+    v0.3 优化：先执行代码层预扫描（违规检测/台词统计/情绪指标），
+    将结构化报告注入 prompt，LLM 仅做语义级定性判断。
     """
+    # v0.3：代码层预扫描
+    preflight = generate_preflight_report(text, max_dialogue_chars=15)
+    preflight_text = preflight.to_injection_text()
+
     sys_prompt = (
         "你是短视频/短剧领域的资深剧本医生，专精于'情绪价值'分析。"
         "你的审核标准与电影/长剧完全不同——微短剧和短剧的核心使命是："
@@ -89,12 +110,15 @@ def run_analysis_emotion_mode(text, client, model_name, kwargs):
     user_prompt = f"""
 你是短视频/短剧领域的资深剧本医生，请对以下剧本进行情绪价值导向的专业诊断。
 
+{preflight_text}
+
 【任务一：多巴胺节奏审计】
 逐集（或逐段）检查以下要素：
 1. 情绪压迫点：开场是否有强有力的情绪刺激（被嘲讽/被打压/被误解/危机降临）
 2. 多巴胺释放：被打压后是否迅速反击打脸（30秒内/合理时间内）
 3. 钩子强度：结尾是否有吸引继续看的悬念（更大危机/身份反转/致命误解/关键证据）
 4. 每集（段）爽感评级：弱/中/强/极强
+（注意：代码已预扫描情绪关键词分布，请基于这些数据做定性判断，不要重复统计）
 
 【任务二：整体情绪弧线评估】
 1. 全剧情绪曲线是否递进（不能越来越平淡）
@@ -107,10 +131,12 @@ def run_analysis_emotion_mode(text, client, model_name, kwargs):
 2. 是否有高冲击物理动作（耳光/掀桌/摔门/冷笑/握拳）
 3. 是否存在废话/水话/解释性台词
 
-【任务四：写作红线扫描】
-1. 心理描写抓捕（"他意识到"/"她感到"/"内心"）
-2. 括号暗示抓捕（"（其实是在掩饰）"）
-3. 解释性台词抓捕
+【任务四：写作红线审核（基于预扫描结果）】
+代码层已经预扫描了以下违规模式并给出命中列表，你的任务：
+1. 逐条确认命中项是否真的是违规（代码可能误判，需你做语义判断）
+2. 判断是否遗漏了代码没找到的违规
+3. 对确认的每个违规给出潜台词+物理动作重写方案
+（不要再逐行扫描文本找违规！代码已经做了这件事。）
 
 【任务五：绿灯会立项陈述】
 Slogan / 受众画像与情绪价值 / 项目商业价值与立项风险
@@ -148,7 +174,13 @@ def run_analysis_structure_mode(text, client, model_name, kwargs):
     """
     结构导向剧本医生：专为中剧和长剧设计。
     核心审核标准：故事的起承转合、逻辑自洽、人物弧光、反转与伏笔。
+
+    v0.3 优化：代码层预扫描违规+台词统计，LLM 做定性判断。
     """
+    # v0.3：代码层预扫描
+    preflight = generate_preflight_report(text, max_dialogue_chars=20)
+    preflight_text = preflight.to_injection_text()
+
     sys_prompt = (
         "你是殿堂级剧本医生，深谙电视剧工业标准与长篇叙事结构。"
         "你精通起承转合的四段式结构、人物弧光理论（Ghost/Lie/Flaw）、"
@@ -161,6 +193,8 @@ def run_analysis_structure_mode(text, client, model_name, kwargs):
 
     user_prompt = f"""
 你是殿堂级剧本医生，请对以下剧本进行结构导向的工业级诊断。
+
+{preflight_text}
 
 【任务一：故事起承转合审计】
 严格按起承转合四段式结构逐一检验：
@@ -182,8 +216,11 @@ def run_analysis_structure_mode(text, client, model_name, kwargs):
 3. 每个伏笔是否有回扣（埋而不揭是叙事欺诈）
 4. 是否存在"机械降神"（突然出现的巧合解决问题）
 
-【任务四：直白心理描写抓捕】
-逐场扫描心理动词、括号暗示、说教台词，给出潜台词和物理动作重写方案。
+【任务四：写作红线审核（基于预扫描结果）】
+代码层已预扫描违规命中列表，你的任务：
+1. 确认命中项是否为真违规
+2. 检查是否有遗漏
+3. 对确认的违规给出潜台词+物理动作重写方案
 
 【任务五：结构痛点与节奏诊断】
 1. 节奏诊断：是否存在"塌陷段"（连续多集无有效推进）
@@ -231,7 +268,13 @@ def run_analysis_movie_mode(text, client, model_name, kwargs):
     """
     电影长片工业分析：Save the Cat 15 节拍 + Ghost/Lie/Flaw + McKee 价值审计。
     最严格的审核标准，要求三幕结构对齐、场景价值翻转、节拍精确映射。
+
+    v0.3 优化：代码层预扫描违规+台词统计，LLM 做定性判断。
     """
+    # v0.3：代码层预扫描
+    preflight = generate_preflight_report(text, max_dialogue_chars=25)
+    preflight_text = preflight.to_injection_text()
+
     sys_prompt = (
         "你是殿堂级好莱坞剧本医生，深谙人物弧光理论体系"
         "（Ghost 前史创伤 / Lie 角色相信的谎言 / Flaw 性格缺陷）"
@@ -244,6 +287,8 @@ def run_analysis_movie_mode(text, client, model_name, kwargs):
 
     user_prompt = f"""
 你是好莱坞剧本医生，请对以下电影长片剧本进行工业级诊断。
+
+{preflight_text}
 
 【任务一：人物弧光诊断（Ghost / Lie / Flaw 强制核验）】
 逐个人物检查：
@@ -259,8 +304,8 @@ def run_analysis_movie_mode(text, client, model_name, kwargs):
 13. Break into Three  14. Finale  15. Final Image
 每个节拍输出：标准功能 / 剧本实际（❌若缺失）/ 理想示范 / 节奏诊断
 
-【任务三：直白心理描写抓捕】
-逐场扫描心理动词、括号暗示、说教台词，给出潜台词和物理动作重写方案。
+【任务三：写作红线审核（基于预扫描结果）】
+代码层已预扫描违规命中列表，你的任务：确认+补漏+给出重写方案。
 
 【任务四：结构痛点与节奏诊断】
 1. 节奏致命伤  2. 未发生价值转变的废场景（McKee检验）  3. 高潮是否足够
@@ -293,8 +338,19 @@ Slogan / 受众画像与情绪价值 / 项目商业价值与立项风险
 # =============================================================================
 
 def run_budget_mode(text, client, model_name, kwargs):
-    """执行制片人预算审计：周期精算 + 烧钱点 + AI降本替代"""
+    """执行制片人预算审计：周期精算 + 烧钱点 + AI降本替代
+
+    v0.3 优化：场景数量由代码层预统计注入，不再让 LLM 估算。
+    """
     eval_text = _truncate(text)
+
+    # v0.3：代码预统计场景
+    total_scenes = count_scenes_code(text)
+    internal, external = count_internal_external_scenes(text)
+    scene_stats = (
+        f"【代码预统计】共 {total_scenes} 个场景（内景{internal}/外景{external}），"
+        f"请基于此数据直接分析，无需重复统计场景数。\n\n"
+    ) if total_scenes > 0 else ""
 
     sys_prompt = (
         "你是国内最精明刻薄的执行制片人，人称' budgeting 阎王'。"
@@ -308,7 +364,7 @@ def run_budget_mode(text, client, model_name, kwargs):
     user_prompt = f"""
 你是精打细算的执行制片人，请对以下剧本进行逐行预算审计。
 
-【任务一：周期精算】预估拍摄天数 + 推演依据 + 雨戏/夜戏/大场面标注
+{scene_stats}【任务一：周期精算】预估拍摄天数 + 推演依据 + 雨戏/夜戏/大场面标注
 【任务二：烧钱点逐行抓捕】大场面/特殊道具/群演/特殊拍摄，逐条刻薄点评
 【任务三：AI 视频降本替代方案】远景/空镜/不可能实拍/群演密集型，评估替代可行性和推荐工具
 【任务四：线下制作成本总结】体量定调/成本区间/最高风险场次
@@ -332,8 +388,21 @@ def run_budget_mode(text, client, model_name, kwargs):
 # =============================================================================
 
 def run_pro_budget_global(text, client, model_name, kwargs):
-    """专业制片主任：全局制片参数分析（剧组规模/日均费率/总天数）"""
+    """专业制片主任：全局制片参数分析（剧组规模/日均费率/总天数）
+
+    v0.3 优化：场景数量/内景外景比例由代码预统计注入 prompt，
+    不再让 LLM '估算'场景总量。
+    """
     eval_text = _truncate(text)
+
+    # v0.3：代码层预统计场景数据
+    total_scenes = count_scenes_code(text)
+    internal, external = count_internal_external_scenes(text)
+    scene_stats_text = (
+        f"【代码预统计】共检测到 {total_scenes} 个场景标记"
+        f"（内景 {internal} / 外景 {external}），"
+        f"请基于此数据推算合理拍摄周期，无需重复统计。\n"
+    ) if total_scenes > 0 else ""
 
     sys_prompt = (
         "你是中国影视行业资深制片主任，拥有20年以上剧组管理经验。"
@@ -368,6 +437,7 @@ def run_pro_budget_global(text, client, model_name, kwargs):
     user_prompt = f"""
 请对以下剧本进行全局制片参数分析，确定整体制片规格。
 
+{scene_stats_text}
 【任务一：确定制作规格】
 根据剧本体量、场景数量、人物规模、特效需求，确定剧组规模和制作体量。
 

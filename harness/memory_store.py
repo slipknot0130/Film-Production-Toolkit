@@ -1,15 +1,21 @@
 """
-harness/memory_store.py — 结构化记忆系统
+harness/memory_store.py — 结构化记忆系统 v2.0
 
 解决长剧创作中的上下文断裂问题：
 - 现有 Doctor memory_snapshot 是单段文本，跨 50+ 集会漂移
 - 此模块提供结构化记忆，精准追踪每个角色状态和每条伏线
 
+v2.0 新增：
+- 集成 SceneTimeline（场景级时间线数据库）
+- 集成 ConsistencyChecker（逻辑一致性检查器）
+- 集成 BeatOutline（分集大纲节拍追踪器）
+- get_character_profile() — 用户提出的"角色档案管理器"工具
+
 核心类：
 - CharacterState：单个角色的状态快照
 - PlotThread：伏线/悬念追踪
 - EpisodeIndex：轻量级集数索引
-- StructuredMemoryStore：统一管理入口
+- StructuredMemoryStore：统一管理入口（集成所有子模块）
 """
 
 import json
@@ -17,9 +23,14 @@ import time
 import uuid
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, TYPE_CHECKING
 
 from .config import get_harness_config
+
+if TYPE_CHECKING:
+    from shared.scene_timeline import SceneTimeline, SceneRecord
+    from harness.consistency_checker import ConsistencyChecker, ConsistencyIssue
+    from shared.beat_outline import BeatOutline
 
 
 # =============================================================================
@@ -235,11 +246,14 @@ class StructuredMemoryStore:
         store.save()
     """
 
-    def __init__(self, project_id: str = "default", config=None):
+    def __init__(self, project_id: str = "default", config=None,
+                 scene_timeline=None, beat_outline=None):
         """
         Args:
             project_id: 项目唯一标识（用于文件隔离）
             config: HarnessConfig，不传则用全局配置
+            scene_timeline: SceneTimeline 实例（可选，用于场景级时间线追踪）
+            beat_outline: BeatOutline 实例（可选，用于分集节拍追踪）
         """
         self.project_id = project_id
         self.config = config or get_harness_config()
@@ -251,6 +265,11 @@ class StructuredMemoryStore:
         # 风格锚点（用于防止文风漂移）
         self.style_anchors: List[str] = []
         self.world_rules: List[str] = []
+
+        # v2.0：集成子模块
+        self.scene_timeline = scene_timeline          # SceneTimeline | None
+        self.beat_outline = beat_outline              # BeatOutline | None
+        self._consistency_checker = None              # ConsistencyChecker（懒加载）
 
         self._memory_path = Path(self.config.memory_dir) / f"{self._safe_filename(project_id)}.json"
 
@@ -295,6 +314,84 @@ class StructuredMemoryStore:
 
     def get_character(self, name: str) -> Optional[CharacterState]:
         return self._characters.get(name)
+
+    def get_character_profile(self, name: str) -> Dict[str, Any]:
+        """获取角色的完整档案（用户提出的"工具1：角色档案管理器"）。
+
+        返回包含角色所有设定、当前状态、历史事件的字典。
+        Writer/Doctor 可通过此接口获取角色的准确状态，
+        避免依赖"记忆"导致的细节漂移。
+
+        Args:
+            name: 角色名
+
+        Returns:
+            完整档案字典，含：身份/外貌/当前状态/情绪/目标/关系/关键事件/秘密/伤口
+            如果角色不存在，返回空字典
+        """
+        char = self._characters.get(name)
+        if not char:
+            return {}
+
+        profile = {
+            "name": char.name,
+            "last_seen_episode": char.last_updated_episode,
+            "current_location": char.current_location,
+            "current_emotion": char.current_emotion,
+            "current_goal": char.current_goal,
+            "relationship_status": char.relationship_status,
+            "recent_events": char.key_events[-5:] if char.key_events else [],
+            "secrets": char.secrets,
+            "wounds": char.wounds,
+            "appearance_notes": char.appearance_notes,
+            "ability_notes": char.ability_notes,
+        }
+
+        # v2.0：如果集成了 SceneTimeline，追加场景出场记录
+        if self.scene_timeline:
+            scenes = self.scene_timeline.get_scenes_by_character(name)
+            if scenes:
+                profile["total_appearances"] = len(scenes)
+                profile["first_appearance"] = f"第{scenes[0].episode}集第{scenes[0].scene_number}场"
+                profile["last_appearance"] = f"第{scenes[-1].episode}集第{scenes[-1].scene_number}场"
+
+        return profile
+
+    def get_character_profile_text(self, name: str) -> str:
+        """get_character_profile 的文本输出版本（可直接注入 LLM prompt）。"""
+        profile = self.get_character_profile(name)
+        if not profile:
+            return f"角色「{name}」暂无档案记录。"
+
+        lines = [
+            f"═══ 角色档案：{name} ═══",
+            f"最后出场：第{profile['last_seen_episode']}集",
+        ]
+        if profile.get("total_appearances"):
+            lines.append(f"出场次数：{profile['total_appearances']}次"
+                         f"（首现{profile.get('first_appearance', '')}，"
+                         f"末现{profile.get('last_appearance', '')}）")
+        if profile.get("current_location"):
+            lines.append(f"当前位置：{profile['current_location']}")
+        if profile.get("current_emotion"):
+            lines.append(f"当前情绪：{profile['current_emotion']}")
+        if profile.get("current_goal"):
+            lines.append(f"当前目标：{profile['current_goal']}")
+        if profile.get("relationship_status"):
+            rel_str = "；".join(f"{k}: {v}" for k, v in profile["relationship_status"].items())
+            lines.append(f"关系状态：{rel_str}")
+        if profile.get("recent_events"):
+            lines.append(f"近期事件：{' / '.join(profile['recent_events'][-3:])}")
+        if profile.get("secrets"):
+            lines.append(f"持有秘密：{'；'.join(profile['secrets'][-2:])}")
+        if profile.get("wounds"):
+            lines.append(f"状态标记：{'；'.join(profile['wounds'])}")
+        if profile.get("appearance_notes"):
+            lines.append(f"外貌备注：{profile['appearance_notes']}")
+        if profile.get("ability_notes"):
+            lines.append(f"能力备注：{profile['ability_notes']}")
+        lines.append("═══ 档案结束 ═══")
+        return "\n".join(lines)
 
     def list_characters(self) -> List[str]:
         return list(self._characters.keys())
@@ -411,14 +508,32 @@ class StructuredMemoryStore:
         if self.style_anchors:
             sections.append("【风格锚点（保持一致）】\n" + "、".join(self.style_anchors[:8]))
 
+        # 5. v2.0：场景时间线上下文
+        if self.scene_timeline and current_episode > 1:
+            timeline_context = self.scene_timeline.get_current_timeline_context(
+                current_episode, scene_number=0
+            )
+            if timeline_context and "暂无" not in timeline_context:
+                sections.append(timeline_context)
+
+        # 6. v2.0：本集待完成节拍
+        if self.beat_outline:
+            beat_context = self.beat_outline.build_writer_beat_context(current_episode)
+            if beat_context and "无预设节拍" not in beat_context:
+                sections.append(beat_context)
+
         if not sections:
             return ""
 
         header = f"═══ 结构化记忆注入（第{current_episode}集创作参考）═══"
         return header + "\n\n" + "\n\n".join(sections) + "\n═══ 记忆注入结束 ═══"
 
-    def build_doctor_check_context(self, current_episode: int) -> str:
-        """构建注入 Doctor QA prompt 的上下文（用于一致性检查）"""
+    def build_doctor_check_context(self, current_episode: int,
+                                   new_content: str = "") -> str:
+        """构建注入 Doctor QA prompt 的上下文（用于一致性检查）。
+
+        v2.0 增强：集成 ConsistencyChecker + BeatOutline + SceneTimeline。
+        """
         sections: List[str] = []
 
         recent = self._episode_index.recent(n=3, before_episode=current_episode)
@@ -431,10 +546,54 @@ class StructuredMemoryStore:
                              for pt in active_threads[:8]]
             sections.append("【需检查的伏线】\n" + "\n".join(thread_titles))
 
+        # v2.0：代码层一致性预扫描
+        if new_content:
+            checker = self.get_consistency_checker()
+            issues = checker.run_all_checks(current_episode, new_content)
+            if issues:
+                report = checker.format_report(issues)
+                sections.append(report)
+            else:
+                sections.append("✅ 代码层一致性预扫描：未发现明显矛盾。")
+
+        # v2.0：节拍完成度检查
+        if self.beat_outline:
+            beat_check = self.beat_outline.build_doctor_beat_context(current_episode)
+            if beat_check:
+                sections.append(beat_check)
+
         if not sections:
             return ""
 
         return "═══ 一致性检查参考 ═══\n\n" + "\n\n".join(sections) + "\n═══ 结束 ═══"
+
+    # ------------------------------------------------------------------
+    # v2.0：一致性检查器 + 集成工具
+    # ------------------------------------------------------------------
+
+    def get_consistency_checker(self):
+        """获取 ConsistencyChecker 实例（懒加载）"""
+        if self._consistency_checker is None:
+            from harness.consistency_checker import ConsistencyChecker
+            self._consistency_checker = ConsistencyChecker(
+                memory_store=self,
+                scene_timeline=self.scene_timeline,
+            )
+        return self._consistency_checker
+
+    def run_consistency_check(self, current_episode: int,
+                              new_content: str = "") -> List:
+        """运行代码层一致性预扫描（用户提出的'工具3：逻辑一致性检查'）。
+
+        Args:
+            current_episode: 当前集数
+            new_content: 当前集剧本内容
+
+        Returns:
+            ConsistencyIssue 列表
+        """
+        checker = self.get_consistency_checker()
+        return checker.run_all_checks(current_episode, new_content)
 
     # ------------------------------------------------------------------
     # 持久化
@@ -483,16 +642,27 @@ class StructuredMemoryStore:
         self.world_rules = []
         if self._memory_path.exists():
             self._memory_path.unlink()
+        # v2.0：重置子模块
+        if self.scene_timeline:
+            self.scene_timeline.reset()
+        if self.beat_outline:
+            self.beat_outline.reset()
 
     # ------------------------------------------------------------------
     # 统计信息
     # ------------------------------------------------------------------
 
     @property
-    def stats(self) -> Dict[str, int]:
-        return {
+    def stats(self) -> Dict[str, Any]:
+        base = {
             "characters": len(self._characters),
             "plot_threads_total": len(self._plot_threads),
             "plot_threads_active": len(self.get_active_plot_threads()),
             "episodes_indexed": len(self._episode_index._index),
         }
+        # v2.0：子模块统计
+        if self.scene_timeline:
+            base.update({f"timeline_{k}": v for k, v in self.scene_timeline.stats.items()})
+        if self.beat_outline:
+            base.update({f"beat_{k}": v for k, v in self.beat_outline.stats.items()})
+        return base

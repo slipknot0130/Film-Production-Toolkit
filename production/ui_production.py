@@ -1053,9 +1053,9 @@ def _render_scene_result(global_scenes):
 # =============================================================================
 
 def render_storyboard(uploaded_file, style_tokens_input=""):
-    """CrewAI 4-Agent 分镜工作台 v2.0 — Seedance 2.0 专业分镜格式"""
-    st.markdown("## 🎥 分镜工作台（Seedance 2.0 专业分镜 v2.0）")
-    st.caption("Seedance 分镜导演 → 视觉档案师 → Seedance 提示词工程师 → 格式质检 | 终极提示词直接可用")
+    """CrewAI 2-Agent 分镜工作台 v3.0 — 结构参数化 + 代码组装"""
+    st.markdown("## 🎥 分镜工作台（Seedance 2.0 结构参数化 v3.0）")
+    st.caption("分镜导演输出结构化JSON → 代码组装Seedance提示词 | LLM专注创意 · 代码保证格式")
 
     # 检测 CrewAI 可用性
     try:
@@ -1104,62 +1104,71 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
 
         st.markdown("---")
 
-        # 第二步：CrewAI 4-Agent 工作流
+        # 第二步：CrewAI 2-Agent 工作流（v3.0）
         chunks = split_script_smart(script_content)
-        st.success(f"第二步：启动 Seedance 2.0 多智能体工作流，对 {len(chunks)} 个剧本切块进行专业分镜...")
+        st.success(f"第二步：启动 Seedance 2.0 结构参数化工作流，对 {len(chunks)} 个剧本切块进行分镜...")
 
         chars_str = json.dumps(global_chars, ensure_ascii=False) if global_chars else ""
         global_shots = []
+        global_atmosphere = ""  # v3.0：全局氛围画质（取第一个切块）
         shot_num = 1
+        accumulated_seconds = 0.0
 
-        with st.spinner("🤖 Seedance 2.0 工作流执行中（分镜导演 → 视觉档案师 → 提示词工程师 → 格式质检）..."):
+        with st.spinner("🤖 Seedance 2.0 工作流执行中（分镜导演 → 质检 → 代码组装）..."):
             for i, chunk in enumerate(chunks):
                 status_placeholder = st.empty()
-                status_placeholder.info(f"  正在处理第 {i+1}/{len(chunks)} 个切块...")
+                status_placeholder.info(f"  正在处理第 {i+1}/{len(chunks)} 个切块（时间码从 {int(accumulated_seconds//60):02d}:{int(accumulated_seconds%60):02d} 开始）...")
                 try:
-                    shots = run_crew_on_chunk(
+                    shots, total_secs, atmosphere = run_crew_on_chunk(
                         chunk, chars_str, style_tokens_input,
                         st.session_state.llm_provider,
                         st.session_state.base_url,
                         st.session_state.api_key or "sk-local",
-                        model_name
+                        model_name,
+                        time_offset_seconds=accumulated_seconds
                     )
+                    # 保存首个切块的全局氛围画质
+                    if i == 0 and atmosphere:
+                        global_atmosphere = atmosphere
                     for s in shots:
                         if isinstance(s, dict):
                             s["镜头号"] = shot_num
                             global_shots.append(s)
                             shot_num += 1
+                    if total_secs > 0:
+                        accumulated_seconds += total_secs
                 except Exception as crew_err:
                     st.warning(f"⚠️ 第 {i+1} 块处理异常：{crew_err}")
                 status_placeholder.info(f"  第 {i+1}/{len(chunks)} 块完成 ✓")
 
-        # 第三步：渲染 Seedance 2.0 专业分镜矩阵
+        # 第三步：展示全局氛围画质 + Seedance 2.0 分镜矩阵
         if global_shots:
-            st.markdown(f"### 🎥 Seedance 2.0 分镜矩阵（总计 {len(global_shots)} 镜）")
+            total_min = int(accumulated_seconds // 60)
+            total_sec = int(accumulated_seconds % 60)
+
+            # v3.0：展示全局氛围画质
+            if global_atmosphere:
+                st.markdown("### 🎨 全局氛围与画质设定")
+                with st.expander("展开查看完整【氛围与画质】", expanded=False):
+                    st.text_area(
+                        "【氛围与画质】", global_atmosphere,
+                        height=200, key="global_atmosphere_display",
+                        label_visibility="collapsed"
+                    )
+                    st.caption("📋 以上为 LLM 根据剧本自动生成的全局视觉设定，可直接复制使用。")
+
+            st.markdown(f"### 🎥 Seedance 2.0 分镜矩阵（总计 {len(global_shots)} 镜 / 累计时长 {total_min} 分 {total_sec} 秒）")
             st.caption("📌 每镜一行「终极Seedance提示词」—— 直接复制粘贴到 Seedance 2.0 即可使用")
 
             cols_order = ["镜头号"] + [c for c in global_shots[0].keys() if c != "镜头号"]
             df_shots = pd.DataFrame(global_shots)[cols_order]
 
-            # v2.0: 终极Seedance提示词已由QA Agent直接输出，无需二次拼接
-            # 如果旧版JSON（11列）意外传入，做兼容降级处理
-            if "终极Seedance提示词" not in df_shots.columns and "视频描述" in df_shots.columns:
-                df_shots["终极Seedance提示词"] = df_shots["视频描述"]
-                if "时间码" not in df_shots.columns:
-                    df_shots.insert(1, "时间码", "")
-                if "景别机位运镜" not in df_shots.columns:
-                    df_shots["景别机位运镜"] = df_shots.apply(
-                        lambda r: f"{r.get('焦段','')}, {r.get('运镜','')}", axis=1
-                    )
-                if "基本设定标签" not in df_shots.columns:
-                    df_shots["基本设定标签"] = "兼容模式"
-
-            # 确保新格式列存在
-            for required_col in ["时间码", "景别机位运镜", "终极Seedance提示词", "基本设定标签"]:
+            # v3.0：代码组装保证输出4列，此处仅做兜底确保
+            for required_col in ["时间码", "景别机位运镜", "终极Seedance提示词"]:
                 if required_col not in df_shots.columns:
                     df_shots[required_col] = ""
 
-            display_cols = ["镜头号", "时间码", "景别机位运镜", "基本设定标签", "终极Seedance提示词"]
+            display_cols = ["镜头号", "时间码", "景别机位运镜", "终极Seedance提示词"]
             df_display = df_shots[[c for c in display_cols if c in df_shots.columns]]
 
             st.data_editor(
@@ -1170,7 +1179,6 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
                     "镜头号": st.column_config.NumberColumn(width="small", format="%d"),
                     "时间码": st.column_config.TextColumn(width="small"),
                     "景别机位运镜": st.column_config.TextColumn(width="medium"),
-                    "基本设定标签": st.column_config.TextColumn(width="small"),
                     "终极Seedance提示词": st.column_config.TextColumn(width="large"),
                 }
             )
