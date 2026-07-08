@@ -504,15 +504,15 @@ def generate_duration_guide(script_text: str) -> str:
     if dialogue_ratio > 0.6:
         expansion = 1.8
         pace_label = "对话主导型"
-        pace_hint = "节奏轻快，镜头切换频繁，镜长可偏短(3-5s)"
+        pace_hint = "对话节奏快，一镜到底对话场景5-8s/镜，其余4-5s/镜（每镜一个主要动作或一次镜头变化）"
     elif dialogue_ratio > 0.3:
         expansion = 2.2
         pace_label = "均衡型"
-        pace_hint = "文戏动作交替，标准镜长(4-6s)"
+        pace_hint = "文戏动作交替，标准镜长4-6s/镜（复杂剧情12-15s或拆多镜）"
     else:
         expansion = 2.5
         pace_label = "动作主导型"
-        pace_hint = "视觉密度高，需要更多镜头覆盖动作细节，镜长(3-5s)"
+        pace_hint = "视觉密度高，武戏2-3s/镜，其余4-5s/镜（每镜不超过一个主要动作）"
 
     # ── 6. 时长估算 ──
     # 纯阅读秒数（中文约3.5字/秒正常讲述节奏）
@@ -553,7 +553,13 @@ def generate_duration_guide(script_text: str) -> str:
   平均镜长：约{avg_shot_sec:.0f}秒/镜
 
   以上参数基于剧本实际体量由代码精确计算，请严格按此范围规划分镜。
-  文戏段落：每段3-5镜 | 武戏段落：每段5-8镜 | 过渡段落：2-3镜
+  
+  Seedance 2.0 时长铁律：
+  · 4-5秒/镜 = 一个主要动作或一次镜头变化（严禁塞入多个动作）
+  · 一镜到底对话 = 5-8秒、正面、1-2句短台词
+  · 武戏打斗 = 2-3秒/镜
+  · 复杂剧情 = 12-15秒或拆分为多镜
+  · 绝不在4-5秒内安排≥2个独立动作+≥2次切镜
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     return guide

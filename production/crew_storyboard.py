@@ -1,22 +1,25 @@
 """
-crew_storyboard.py — CrewAI 后端模块（v3.0 结构参数化版）
+crew_storyboard.py — CrewAI 后端模块（v4.1 纯文本四段式版）
 
-v3.0 核心重构（2026-06-30）：
-  核心原则：LLM 做创意判断，代码做格式化组装。
+v4.1 优化（2026-07-08）：
+  去掉 Section 1-2 中的 <主体N>/<场景N> 占位符，改为纯文本自然语言描述。
+  纯文本工作流（无 @图片/@视频 引用）下，<主体N> 锚定标签无对应媒体可锚定，
+  会让视频创作者困惑"是否需要手动替换"。改为纯文本后可直接阅读和粘贴。
 
-  架构变更：
-  1. 从 4 Agent 缩减到 2 Agent（Director + QA）
-  2. Director 输出结构化 JSON（镜头参数 + 画面描述），不再关心排版格式
-  3. Image / Video Agent 功能由代码层替代
-  4. 代码层负责：时间码累加计算、@角色名/@场景名 引用插入、Seedance 文本模板组装
+v4.0 核心升级（2026-07-08）：
+  融合 Seedance 2.0 官方 Prompt 四段式规范，输出格式全面对齐文档规则：
+  1. 主体与特征锚定 — 角色视觉特征 + 场景时间地点
+  2. 参考关系和子任务判断 — 任务类型声明 + 故事概要
+  3. 动态描述 — 时序分段的动作/镜头/台词{}/音效<>/BGM（）
+  4. 静态描述 — 光线/色彩/画质/风格（不重复第3段）
 
-  收益：
-  - Agent backstory 从 ~300 行 → ~50 行（-83%）
-  - 输出格式 100% 确定性（不再依赖 LLM 排版能力）
-  - @引用插入由代码执行，准确率 100%
-  - LLM Token 消耗大幅降低，创意质量提升
+  Agent 层面增强：
+  - Director 注入音频符号约定、一镜到底规则、脸部安全约束、反主观词规则
+  - QA 新增指令冲突检测、内容过载检测、持续声音标记检查
 
-  输出格式不变：4 列（镜头号 | 时间码 | 景别机位运镜 | 终极Seedance提示词）
+  架构不变：2-Agent 串行 + 代码组装，核心原则「LLM 做创意，代码做格式化」延续。
+
+  输出格式：4 列（镜头号 | 时间码 | 景别机位运镜 | 终极Seedance提示词-四段式）
 """
 
 import os
@@ -44,25 +47,40 @@ def create_llm(engine_choice: str, api_base: str, api_key: str, model_name: str)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Agent 工厂 — v3.0 结构参数化版（2 Agent）
+# Agent 工厂 — v4.0 结构参数化版（2 Agent + Seedance 规则注入）
 # ═════════════════════════════════════════════════════════════════════════════
 
 def create_agents(llm: LLM) -> dict:
     """
-    v3.0：创建 2 个 Agent
-      director    — 分镜导演（读剧本 → 出结构化 JSON）
-      qa_reviewer — 轻量质检（验证 + 修正 JSON）
+    v4.0：创建 2 个 Agent（注入 Seedance 2.0 规则约束）
+      director    — 分镜导演（读剧本 → 出结构化 JSON，含音频符号约定）
+      qa_reviewer — 分镜质检（语义级抽查 + Seedance 规则合规审查）
     """
 
     # ═══════════════════════════════════════════════════════════════════
-    # Agent 0: 分镜导演（v3.0 — 纯创意，零排版负担）
+    # Agent 0: 分镜导演（v4.0 — 融合 Seedance 2.0 官方四段式规则）
     # ═══════════════════════════════════════════════════════════════════
     director_agent = Agent(
         role='Seedance 分镜导演',
-        goal='分析剧本，输出结构化分镜 JSON（镜头参数 + 专业级画面描述）',
+        goal='分析剧本，输出结构化分镜 JSON（镜头参数 + 专业级画面描述 + 音频符号）',
         backstory="""你是精通 AI 文生视频的分镜导演，熟悉 Seedance 2.0 / Kling / 即梦 等模型。
 
 你的唯一输出是结构化 JSON。所有排版格式由代码层处理，你不需要关心。
+
+【Seedance 2.0 官方提示词规则 — 必须遵守】
+· 音频符号约定：
+  台词内容→用{花括号}包裹   例：她低声说道{你终于来了。}
+  音效环境音→用<尖括号>包裹 例：<雨声和远处雷声持续>
+  背景音乐BGM→用（圆括号）包裹 例：（低沉弦乐，节奏缓慢）
+· 持续声音标记：镜头切换后若同一声源继续，在描述前方写"<雨声继续>"或"（BGM继续）"
+· 台词规范：必须写清语言、音色、语气、语速；有嘴型时写"嘴型同步"
+· 一镜到底规则：角色说话场景默认 5-8 秒、一镜到底、正面说话、1-2 句短台词
+· 时长节奏：4-5 秒内只安排一个主要动作或一次镜头变化；复杂剧情用 12-15 秒或拆为多镜
+· 脸部安全：避免生成写实真人清晰脸部特写（容易被内容审核拦截），面部镜头用中景/侧脸/光影遮挡替代大特写
+· 反主观词：禁止"温馨""压抑""暧昧""廉价"等无视觉依据词；表达氛围时用可见依据支撑：如
+  「暖黄色室内灯光 + 低对比度 + 人物距离较近，形成温和氛围」
+· 指令一致性：不要同时要求"固定镜头"又写"环绕""推拉摇移"
+· 内容不过载：4-5 秒内禁止塞入多个动作或多次镜头切换
 
 【画面描述质量铁律】（你的核心竞争力）
 1. 动作链完整：入画 → 运动过程 → 落点，轨迹每一步都清晰可辨
@@ -89,18 +107,25 @@ def create_agents(llm: LLM) -> dict:
     )
 
     # ═══════════════════════════════════════════════════════════════════
-    # Agent 1: 轻量质检（v3.0 — 仅做语义抽查，不做格式检查）
+    # Agent 1: 分镜质检（v4.0 — 新增 Seedance 规则专项检查）
     # ═══════════════════════════════════════════════════════════════════
     qa_reviewer_agent = Agent(
         role='分镜质检',
-        goal='抽查Director的JSON输出，修正创意质量问题，保证画面描述密度达标',
-        backstory="""你是分镜质量审查员。Director已输出结构化JSON，你只需做语义级抽查。
+        goal='抽查Director的JSON输出，修正创意质量问题，保证画面描述密度达标，验证Seedance规则合规',
+        backstory="""你是分镜质量审查员。Director已输出结构化JSON，你需要做语义级抽查 + Seedance 规则合规审查。
 
 检查项：
 1. 画面描述密度：是否有镜头画面内容 <60字？→ 补充动作/光影/质感细节
 2. 抽象心理转译：是否有"他感到""她意识到"等不可拍摄内容？→ 转译为可见肢体动作
 3. 透视屏蔽：背后/过肩镜头是否违规描写了正面五官？→ 修正视角
 4. 场景一致性：镜头引用的场景名是否在场景定义中存在？→ 修正或补定义
+5. 音频符号正确性：台词是否用{}而非其他符号？音效用<>而非{}？BGM用（）？
+   → 修正为正确的 Seedance 符号约定
+6. 指令冲突检测：「固定镜头」和「推/拉/摇/移/环绕」是否同时出现？→ 冲突则保留其一
+7. 内容过载检测：4-5秒镜头内是否有 ≥2 个独立动作 + ≥2 次镜头切换？→ 拆分为多镜或延长时长
+8. 持续声音标记：同一场景连续镜头中，若前镜有环境声/BGM，后镜是否标记了"<xx继续>"或"（BGM继续）"？
+9. 脸部安全：是否有"写实真人清晰面部特写""毛孔级面部细节"等风险描述？→ 降级为"中景侧脸""光影遮挡面部"
+10. 反主观词：是否有"温馨""压抑""暧昧""廉价""恐怖"等无视觉依据词？→ 转为可见依据
 
 修正后直接输出完整 JSON，不要解释改了什么。纯 JSON，无 Markdown。""",
         llm=llm,
@@ -115,11 +140,11 @@ def create_agents(llm: LLM) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Task 工厂 — v3.0
+# Task 工厂 — v4.0
 # ═════════════════════════════════════════════════════════════════════════════
 
 def create_tasks(agents: dict) -> dict:
-    """v3.0：2 个 Task（Director + QA）"""
+    """v4.0：2 个 Task（Director + QA，含 Seedance 2.0 规则约束）"""
 
     # ── Task 0: 分镜导演（结构化 JSON 输出）──
     task_director = Task(
@@ -160,19 +185,22 @@ def create_tasks(agents: dict) -> dict:
   · 全局氛围画质：一个完整文本块，不是键值对。输出给用户当作整个项目的视觉设定参考。
   · 场景定义：对本切块中出现的每个场景给出环境描述。场景名用简短中文名（如"黑水林""阿龙婚房"）。
   · 镜头号：从1开始的整数。
-  · 时长秒：该镜建议持续秒数（文戏3-6s，武戏2-3s，特写1-2s，过渡2-3s）。
-  · 景别：全景 / 中景 / 近景 / 特写 / 大特写 / 远景。
+  · 时长秒：该镜建议持续秒数。单动作/单切镜=4-5s；对话文戏=5-8s；武戏打斗=2-3s；过渡衔接=2-3s；复杂剧情=12-15s 或拆多镜。绝不在4-5秒内塞≥2个独立动作。
+  · 景别：全景 / 中景 / 近景 / 特写 / 大特写 / 远景。避免写实真人面部大特写（改中景/侧脸）。
   · 机位：拍摄高度+角度+距离，如"低角度仰拍，贴近地面""高机位微俯拍""眼平机位"。
   · 构图：人物在画面中的位置关系、前景/背景层次、引导线、三分法/黄金分割等。
-  · 运镜：运动方式+速度，如"慢速推轨""固定仅呼吸感""手持微晃跟拍""快速横摇"。
+  · 运镜：运动方式+速度，如"慢速推轨""固定仅呼吸感""手持微晃跟拍""快速横摇"。禁止「固定镜头」+「推拉摇移环绕」同时出现。
   · 画面内容：★ 核心创意输出 ★ 角色名直接写原名（如"钱阿龙"），代码会自动加@前缀。禁止只写"他走进来"这种干瘪描述！
+    画面内容中请按 Seedance 约定嵌入音频符号：台词用{}、音效用<>、BGM用（）。
+    例：压低声音说{别出声。}，<远处传来犬吠声>，（低沉钢琴渐起）
   · 出场角色：该镜头中出现的角色名列表，按出场顺序。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【按上方「剧本体量分析」参数严格执行】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   总镜数和总时长严格按代码计算的建议范围规划。
-  文戏3-5镜/段，武戏5-8镜/段，过渡2-3镜/段。
+  对话段落：3-5镜/段（一镜到底对话5-8s） | 武戏段落：5-8镜/段（2-3s/镜） | 过渡段落：2-3镜/段（2-3s/镜）
+  每镜严格遵守：4-5s内=一个主动作/一次切镜，复杂剧情=12-15s或拆多镜
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【输出铁律】
@@ -188,7 +216,7 @@ def create_tasks(agents: dict) -> dict:
         agent=agents['director']
     )
 
-    # ── Task 1: 轻量质检 ──
+    # ── Task 1: 分镜质检（v4.0 新增 Seedance 规则审查）──
     task_qa_review = Task(
         description="""你是分镜质检。审查Director的结构化JSON输出，修正后输出。
 
@@ -213,6 +241,29 @@ C. 透视屏蔽：
 D. 场景一致性：
    - 分镜引用的场景名是否在「场景定义」中存在？→ 不存在则补充或修正
 
+E. Seedance 音频符号正确性：
+   - 台词是否用{}而非其他符号？→ 修正为{花括号}
+   - 环境音/音效是否用<>？→ 修正为<尖括号>
+   - BGM是否用（）？→ 修正为（圆括号）
+   - 没有音效/台词的镜头不要强行添加符号
+
+F. 指令冲突检测：
+   - 「固定镜头」是否与「推/拉/摇/移/环绕」同时出现在同一镜头？→ 冲突则删除其一
+   - 「无声」是否与「背景音乐」同时出现？→ 冲突则保留其一
+
+G. 内容过载检测：
+   - 4-5 秒镜头内是否有 ≥2 个独立动作 + ≥2 次镜头切换？→ 拆分镜头或延长至12-15秒
+   - 是否有单一镜头塞入完整对话+打斗+场景转换？→ 拆分为多镜
+
+H. 持续声音标记：
+   - 同一场景连续镜头中，若前进有"<雨声>""（BGM）"，后镜画面描述起始处是否写"<雨声继续>""（BGM继续）"？
+
+I. 脸部安全：
+   - 是否出现"面部大特写""写实真人清晰脸部""毛孔级面部细节"？→ 降级
+
+J. 反主观词：
+   - 是否出现"温馨""压抑""暧昧""廉价""恐怖""浪漫"等无视觉依据词？→ 转为可见依据
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【输出格式】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -221,7 +272,7 @@ D. 场景一致性：
 纯 JSON，无 Markdown 标记，无解释文字。
 如果无需修正，原样输出。""",
         expected_output="""修正后的完整 JSON 对象，与Director输出结构完全一致。
-内容已修正至专业影视级质量标准。
+内容已修正至专业影视级质量标准，Seedance 2.0 规则全部合规。
 纯JSON，无Markdown，无解释。""",
         agent=agents['qa_reviewer'],
         context=[task_director]
@@ -234,7 +285,7 @@ D. 场景一致性：
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 代码组装引擎 — v3.0 核心：结构化 JSON → Seedance 提示词
+# 代码组装引擎 — v4.1 核心：结构化 JSON → Seedance 2.0 四段式提示词（纯文本无占位符）
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _format_timecode(total_seconds: float) -> str:
@@ -246,49 +297,132 @@ def _format_timecode(total_seconds: float) -> str:
 
 def _inject_references(content: str, scene_name: str, characters: list) -> str:
     """
-    在画面内容中自动插入 @场景名 和 @角色名 引用。
-    
+    在画面内容中自动插入 @角色名 引用。
+    保护 Seedance 音频符号（{} <> ()）内的文本不被 @ 注入破坏。
+
     规则：
-    - 每段开头（或第一个角色名出现前）插入 @场景名
-    - 每个角色名的第一次出现替换为 @角色名
+    - 每个角色名的第一次出现（且不在{}<>()音频标记内）替换为 @角色名
     - 同一角色在同一镜头内多次出现时，仅第一次加@
     """
     result = content
-    
-    # 插入角色引用：将出场角色列表中的角色名首次出现替换为 @角色名
+
     for char in characters:
-        if char and char in result:
-            # 仅替换第一次出现
-            result = result.replace(char, f"@{char}", 1)
-    
+        if not char or char not in result:
+            continue
+        # 保护音频标记内的文本：先用占位符替换{}<>()内容，注入后再恢复
+        audio_blocks = []
+        def _mask_audio(m):
+            audio_blocks.append(m.group(0))
+            return f"\x00AUDIO{len(audio_blocks)-1}\x00"
+        masked = re.sub(r'\{[^}]*\}|<[^>]*>|（[^）]*）', _mask_audio, result)
+        # 在 mask 后的文本中做 @注入
+        if char in masked:
+            masked = masked.replace(char, f"@{char}", 1)
+        # 恢复音频块
+        for i, block in enumerate(audio_blocks):
+            masked = masked.replace(f"\x00AUDIO{i}\x00", block)
+        result = masked
+
     return result
+
+
+def _extract_character_brief(chars: list, content: str) -> dict:
+    """
+    为 Section 1「主体与特征锚定」提取角色的 2-3 个关键视觉特征。
+    从画面内容中提取首次出现该角色时的前后文字作为简要特征描述。
+    返回 {角色名: "2-3个关键特征"} 的映射。
+    """
+    briefs = {}
+    for char in chars:
+        if not char:
+            continue
+        idx = content.find(char)
+        if idx >= 0:
+            # 取角色名后 30 字作为特征描述上下文
+            ctx = content[idx + len(char):idx + len(char) + 30].strip()
+            # 找最近的第一个自然断点（6 字以上才有意义）
+            cut = ctx
+            best_pos = len(ctx)
+            for sep in ['。', '，', '；', '、', '\n']:
+                pos = ctx.find(sep)
+                if 6 < pos < best_pos:
+                    best_pos = pos
+            if best_pos < len(ctx):
+                cut = ctx[:best_pos]
+            cut = cut.replace('@', '').strip()
+            if len(cut) >= 2:
+                # 最多保留 30 字
+                briefs[char] = cut[:30].strip()
+    return briefs
+
+
+def _extract_scene_brief(scene_desc: str) -> str:
+    """
+    从完整场景描述中提取简要标识（时间 + 地点），用于 Section 1。
+    避免硬截断导致残破文本。
+    """
+    if not scene_desc:
+        return ""
+    # 从 | 分隔的场景定义中提取 时间 和 地点 字段
+    parts = {}
+    for segment in scene_desc.replace("｜", "|").split("|"):
+        segment = segment.strip()
+        for sep_char in ("：", ":"):
+            if sep_char in segment:
+                key, val = segment.split(sep_char, 1)
+                key = key.strip()
+                if key in ("时间", "地点"):
+                    parts[key] = val.strip()[:20]
+                break
+    if "地点" in parts:
+        time_part = f"{parts['时间']}，" if "时间" in parts else ""
+        return f"{time_part}{parts['地点']}"
+    # 回退：安全截断
+    return scene_desc.split("|")[0].strip()[:40]
 
 
 def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) -> tuple:
     """
-    v3.0 核心组装函数：将 LLM 输出的结构化 JSON 转换为4列分镜数据。
-    
+    v4.1 核心组装函数：按 Seedance 2.0 四段式格式生成提示词。
+
+    四段式结构（纯文本工作流，无 <主体N> 占位符）：
+      1. 主体与特征锚定 — 角色名 + 2-3 个视觉特征，场景名 + 时间/地点
+      2. 参考关系和子任务判断 — 任务类型 + 故事概要（自然语言）
+      3. 动态描述 — 时序分段的动作/镜头/台词{}/音效<>/BGM（）
+      4. 静态描述 — 光线/色彩/画质/风格（不重复第3段已有内容）
+
     参数:
-      shot_data: Director/QA 输出的 JSON dict，含「全局氛围画质」「场景定义」「分镜列表」
-      time_offset_seconds: 跨切块时间码偏移（前序切块累计秒数）
-    
+      shot_data: Director/QA 输出的 JSON dict
+      time_offset_seconds: 跨切块时间码偏移
+
     返回:
       (shot_list, total_seconds, global_atmosphere)
-        - shot_list: list[dict]，每个dict含4列（镜头号/时间码/景别机位运镜/终极Seedance提示词）
-        - total_seconds: 本切块累计总时长秒数
-        - global_atmosphere: 全局氛围画质文本（供UI单独展示）
     """
     shot_list = []
     accumulated = time_offset_seconds
     global_atmosphere = shot_data.get("全局氛围画质", "")
     scene_defs = shot_data.get("场景定义", {})
     shots = shot_data.get("分镜列表", [])
-    
+
     if not shots:
         return [], time_offset_seconds, global_atmosphere
-    
+
+    # 预计算全局氛围摘要（用于 Section 4 静态描述注入）
+    global_atmo_summary = ""
+    if global_atmosphere:
+        atmo = global_atmosphere.strip()
+        # 取前 200 字作为风格/画质摘要
+        if len(atmo) > 200:
+            cut_pos = atmo[:200].rfind('。')
+            if cut_pos > 50:
+                global_atmo_summary = atmo[:cut_pos + 1]
+            else:
+                global_atmo_summary = atmo[:200] + '…'
+        else:
+            global_atmo_summary = atmo
+
     for shot in shots:
-        # 基本字段提取
+        # ── 基本字段提取 ──
         shot_num = shot.get("镜头号", len(shot_list) + 1)
         scene_name = str(shot.get("场景名", "")).strip()
         duration = max(float(shot.get("时长秒", 4)), 1.0)
@@ -300,62 +434,117 @@ def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) 
         characters = shot.get("出场角色", [])
         if isinstance(characters, str):
             characters = [c.strip() for c in characters.replace("、", ",").split(",") if c.strip()]
-        
-        # 时间码计算
+
+        # ── 时间码计算 ──
         start_sec = accumulated
         end_sec = accumulated + duration
         timecode = f"{_format_timecode(start_sec)}~{_format_timecode(end_sec)}"
         accumulated = end_sec
-        
-        # 组装「景别机位运镜」列（紧凑摘要）
-        camera_summary_parts = []
-        if shot_type:
-            camera_summary_parts.append(shot_type)
-        if camera_pos:
-            camera_summary_parts.append(camera_pos)
-        if camera_move:
-            camera_summary_parts.append(camera_move)
-        camera_summary = "，".join(camera_summary_parts)
-        
-        # 在画面内容中注入 @引用
+
+        # ── 景别机位运镜摘要列（不变）──
+        camera_parts = [p for p in [shot_type, camera_pos, camera_move] if p]
+        camera_summary = "，".join(camera_parts)
+
+        # ── 场景描述提取 ──
+        scene_desc = ""
+        if isinstance(scene_defs, dict) and scene_name in scene_defs:
+            scene_desc = str(scene_defs[scene_name]).strip()
+
+        # ── 角色特征简要提取 ──
+        char_briefs = _extract_character_brief(characters, content)
+
+        # ════════════════════════════════════════
+        # Section 1: 主体与特征锚定（纯文本，无占位符）
+        # ════════════════════════════════════════
+        # 格式：缩进列表，角色写关键特征，场景写时间+地点
+        section1_lines = []
+        for char in characters[:5]:
+            brief = char_briefs.get(char, "")
+            if brief:
+                section1_lines.append(f"  · {char}：{brief}")
+            else:
+                section1_lines.append(f"  · {char}")
+        if scene_name:
+            scene_brief = _extract_scene_brief(scene_desc)
+            section1_lines.append(f"  · {scene_name}：{scene_brief}" if scene_brief else f"  · {scene_name}")
+
+        # ════════════════════════════════════════
+        # Section 2: 参考关系和子任务判断（自然语言，简洁概要）
+        # ════════════════════════════════════════
+        char_names = "、".join(characters[:5]) if characters else "角色"
+        section2 = f"任务类型：参考。根据剧本设定，生成 {char_names} 在 {scene_name or '场景'} 中的视频。"
+
+        # ════════════════════════════════════════
+        # Section 3: 动态描述
+        # ════════════════════════════════════════
+        # 注入 @引用
         content_with_refs = _inject_references(content, scene_name, characters)
-        
-        # 组装「终极Seedance提示词」（完整的单镜 Seedance 文本）
-        # 格式：
-        # @场景名
-        # 
-        # 分镜N：时间码  景别：xxx，机位。构图：xxx。运镜手法：xxx。画面内容：xxx
-        scene_ref = f"@{scene_name}" if scene_name else ""
-        
-        prompt_parts = [scene_ref, ""]
-        shot_header = (
-            f"分镜{shot_num}：{timecode}  "
-            f"景别：{shot_type}，{camera_pos}。"
-            f"构图：{composition}。"
-            f"运镜手法：{camera_move}。"
-            f"画面内容：{content_with_refs}"
+
+        # 构建镜头参数行
+        camera_line_parts = []
+        if shot_type:
+            camera_line_parts.append(f"景别：{shot_type}")
+        if camera_pos:
+            camera_line_parts.append(f"机位：{camera_pos}")
+        if composition:
+            camera_line_parts.append(f"构图：{composition}")
+        if camera_move:
+            camera_line_parts.append(f"运镜：{camera_move}")
+        camera_line = "，".join(camera_line_parts)
+
+        # 组装 Section 3：镜头参数行 + 画面内容
+        section3 = f"@{scene_name}\n\n{camera_line}。\n{content_with_refs}"
+
+        # ════════════════════════════════════════
+        # Section 4: 静态描述
+        # ════════════════════════════════════════
+        section4_parts = []
+        # 场景环境信息（光线/色彩部分）
+        if scene_desc:
+            section4_parts.append(f"场景环境：{scene_desc}")
+        # 全局画质/风格（取摘要，不重复第3段已有的动作描述）
+        if global_atmo_summary:
+            section4_parts.append(f"画质与风格参考：{global_atmo_summary}")
+        # 如果都为空，给出默认提示
+        if not section4_parts:
+            section4_parts.append("（与第3段动态描述保持一致，无额外静态元素需要补充）")
+
+        section4 = "\n".join(section4_parts)
+
+        # ════════════════════════════════════════
+        # 组装最终提示词
+        # ════════════════════════════════════════
+        header_line = f"═══════════════════════════════════════\n分镜{shot_num}：{timecode}（{duration}秒）\n═══════════════════════════════════════"
+
+        final_prompt = (
+            f"{header_line}\n\n"
+            f"1. 主体与特征锚定\n"
+            + "\n".join(section1_lines) + "\n\n"
+            f"2. 参考关系和子任务判断\n"
+            f"{section2}\n\n"
+            f"3. 动态描述\n"
+            f"{section3}\n\n"
+            f"4. 静态描述\n"
+            f"{section4}"
         )
-        prompt_parts.append(shot_header)
-        
-        final_prompt = "\n".join(prompt_parts)
-        
+
         shot_list.append({
             "镜头号": str(shot_num),
             "时间码": timecode,
             "景别机位运镜": camera_summary,
             "终极Seedance提示词": final_prompt
         })
-    
+
     total_seconds = accumulated - time_offset_seconds
     return shot_list, total_seconds, global_atmosphere
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Crew 工厂 — v3.0（2 Agent）
+# Crew 工厂 — v4.0（2 Agent）
 # ═════════════════════════════════════════════════════════════════════════════
 
 def create_crew(agents: dict, tasks: dict) -> Crew:
-    """v3.0：创建 Director + QA 双 Agent 顺序 Crew"""
+    """v4.0：创建 Director + QA 双 Agent 顺序 Crew"""
     return Crew(
         agents=[agents['director'], agents['qa_reviewer']],
         tasks=[tasks['task_director'], tasks['task_qa_review']],
@@ -385,12 +574,12 @@ def create_crew_qa_only(agents: dict, tasks: dict) -> Crew:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# JSON 解析 — v3.0（适配新 Schema）
+# JSON 解析 — v4.0（适配新 Schema）
 # ═════════════════════════════════════════════════════════════════════════════
 
 def parse_structured_json(raw_text: str) -> dict:
     """
-    v3.0：从 LLM 输出中提取结构化分镜 JSON（全局氛围画质 + 场景定义 + 分镜列表）。
+    v4.0：从 LLM 输出中提取结构化分镜 JSON（全局氛围画质 + 场景定义 + 分镜列表）。
     返回 dict 或 None。
     """
     import json as _json
@@ -456,10 +645,23 @@ def _parse_timecode_end(tc: str) -> float:
 
 
 def _validate_min_content(shot_list: list):
-    """代码层标注画面内容过短的镜头。"""
+    """代码层标注画面内容过短的镜头（v4.0: 适配四段式格式解析）。遍历全部镜头，逐个检查。"""
     for shot in shot_list:
         prompt = str(shot.get("终极Seedance提示词", ""))
-        # 提取画面内容部分
+        # 尝试从四段式格式中提取「3. 动态描述」段的内容
+        section3_match = re.search(r'3\.\s*动态描述\s*\n(.+?)(?:\n\n4\.|\Z)', prompt, re.DOTALL)
+        if section3_match:
+            section3_text = section3_match.group(1).strip()
+            # 去掉镜头参数行，取纯画面描述
+            # 镜头参数行格式: "@场景名\n\n景别：xxx，机位：xxx，构图：xxx，运镜：xxx。\n..."
+            pure_content = re.sub(r'^@\S+\s*\n+', '', section3_text)
+            pure_content = re.sub(r'^[^\n]*?(?:景别|机位|构图|运镜)[^\n]*?\n', '', pure_content)
+            pure_content = pure_content.strip()
+            if len(pure_content) < 50:
+                shot["终极Seedance提示词"] = prompt + f"\n\n⚠️ [画面描述仅{len(pure_content)}字，可能不够丰富]"
+            continue
+
+        # 回退：兼容旧格式（v3.0 扁平提示词）
         content_match = re.search(r'画面内容：(.+)$', prompt, re.DOTALL)
         if content_match:
             content_text = content_match.group(1).strip()
