@@ -53,10 +53,10 @@ def get_llm_kwargs(provider):
 # call_llm_json — JSON强制输出+自动重试
 # =============================================================================
 
-def call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.0, max_retries=5):
+def call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.0, max_retries=3):
     """
-    调用LLM并强制JSON输出，失败自动重试，带JSON修复机制。
-    来自程序B的核心工具函数（增强版）。
+    v5.0 优化：调用LLM并强制JSON输出，失败自动重试（max_retries=3，减少token浪费）。
+    内置5层JSON解析降级策略，单次重试成功率已很高，无需5次重试。
     """
     strict_sys_prompt = sys_prompt + "\n\n【严格系统指令】：你必须输出合法的 JSON 格式。绝对禁止在 JSON 的字符串值内部使用未转义的双引号、绝对禁止漏掉键值对之间的逗号。"
 

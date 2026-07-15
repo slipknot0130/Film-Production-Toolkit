@@ -304,25 +304,13 @@ _SHOWRUNNER_REVISION_BASE_PROMPT = """你是一位经验丰富的影视剧本架
 
 ## ⚠️ 你的任务是【定向修改】，而非全盘重写
 
-你必须仔细阅读以下「初稿大纲」和「修改意见」，然后**仅针对修改意见进行局部调整和精修**。
+你必须仔细阅读 user prompt 中提供的「初稿大纲」和「修改意见」，然后**仅针对修改意见进行局部调整和精修**。
 
 ## 核心原则（违反则扣分）
 1. **保留优秀设定** - 原大纲中不需要修改的部分，必须原样保留
 2. **精准定向修改** - 只改用户明确提出要改的地方
 3. **禁止偏离核心逻辑** - 不能因为局部修改而破坏原有的核心痛点/爽感弧线
 4. **保持格式完整** - 修改后仍然必须输出完整的《全局结构大纲与人物小传》
-
-## 待修改内容
-
-### 【初稿大纲】
-{previous_outline}
-
----
-
-### 【制片人（用户）的修改意见】
-{user_feedback}
-
----
 
 ## 请按以下步骤执行
 
@@ -334,16 +322,13 @@ _SHOWRUNNER_REVISION_BASE_PROMPT = """你是一位经验丰富的影视剧本架
 1. 必须在大纲最开头保留 [总集数: N] 标注
 2. 必须输出完整的《全局结构大纲与人物小传》文档
 3. 在修改处可以简要标注「已根据意见调整」
-
-## 目标剧本格式
-{format}
 """
 
 _SHOWRUNNER_REVISION_DOPAMINE_PROMPT = """你是一位经验丰富的影视剧本架构师和分镜导演，擅长爆款竖屏微短剧。
 
 ## ⚠️ 你的任务是【定向修改】，而非全盘重写
 
-你必须仔细阅读以下「初稿大纲」和「修改意见」，然后**仅针对修改意见进行局部调整和精修**。
+你必须仔细阅读 user prompt 中提供的「初稿大纲」和「修改意见」，然后**仅针对修改意见进行局部调整和精修**。
 
 ## 🔥 多巴胺爽剧核心法则（必须遵守）
 - 不能削弱原有的情绪爽点
@@ -355,18 +340,6 @@ _SHOWRUNNER_REVISION_DOPAMINE_PROMPT = """你是一位经验丰富的影视剧�
 2. **精准定向修改** - 只改用户明确提出要改的地方
 3. **禁止偏离核心爽感逻辑**
 4. **保持三块结构完整** - 全局背景/人物小传/分集梗概 三个部分都必须保留完整
-
-## 待修改内容
-
-### 【初稿大纲】
-{previous_outline}
-
----
-
-### 【制片人（用户）的修改意见】
-{user_feedback}
-
----
 
 ## 请按以下步骤执行
 
@@ -380,27 +353,18 @@ _SHOWRUNNER_REVISION_DOPAMINE_PROMPT = """你是一位经验丰富的影视剧�
 2. 必须输出完整的「三块结构」文档
 3. 在修改处可以简要标注「已根据意见调整」
 4. 如果修改意见涉及集数调整，必须更新 [总集数: N] 标注
-
-## 目标剧本格式
-{format}
 """
 
 
-def _build_showrunner_revision_prompt(
-    script_format: str,
-    previous_outline: str,
-    user_feedback: str,
-) -> str:
-    """构建架构师定向修改 Prompt（内部使用）"""
+def _build_showrunner_revision_prompt(script_format: str) -> str:
+    """
+    v5.0 缓存优化版：构建架构师定向修改 system prompt（纯常量，无动态变量）。
+    所有动态内容（previous_outline/user_feedback/format）已移至 user prompt。
+    """
     base = (
         _SHOWRUNNER_REVISION_DOPAMINE_PROMPT
         if is_micro_drama_mode(script_format)
         else _SHOWRUNNER_REVISION_BASE_PROMPT
-    )
-    base = base.format(
-        previous_outline=previous_outline,
-        user_feedback=user_feedback,
-        format=script_format,
     )
     # 【核心】动态 Prompt 路由：追加格式专属策略指令
     strategy = _get_format_strategy(script_format)
@@ -426,9 +390,9 @@ def build_showrunner_prompt(
         previous_outline: 如果存在用户修改意见，此为之前的初稿大纲
         user_feedback: 用户的定向修改意见
     """
-    # 定向修改分支：用户提交了修改意见 → 使用 Revision Prompt
+    # 定向修改分支：用户提交了修改意见 → 使用 Revision Prompt（纯常量，动态内容在 user prompt）
     if previous_outline and user_feedback:
-        base = _build_showrunner_revision_prompt(script_format, previous_outline, user_feedback)
+        base = _build_showrunner_revision_prompt(script_format)
     else:
         # 正常生成分支
         base = _SHOWRUNNER_DOPAMINE_PROMPT if is_micro_drama_mode(script_format) else _SHOWRUNNER_BASE_PROMPT
@@ -445,14 +409,8 @@ def build_showrunner_prompt(
 # -----------------------------------------------------------------------------
 # 执行编剧 (Writer Agent) - v4.0 多巴胺版
 # -----------------------------------------------------------------------------
-# 基础版
-_WRITER_BASE_PROMPT = """你是一位专业电影编剧，精通视觉化写作。你的任务是：根据全局大纲和上一集的记忆快照，撰写【第 {episode_num} 集】的完整剧本。
-
-## 本集基本信息
-- **第 {episode_num} 集**（全剧共 {total_episodes} 集）
-- **全局大纲摘要**：{outline_summary}
-- **人物小传**：{character_settings}
-- **上一集记忆快照**：{memory_snapshot}
+# 基础版（v5.0 缓存优化：所有动态变量移至 user prompt，system prompt 保持常量）
+_WRITER_BASE_PROMPT = """你是一位专业电影编剧，精通视觉化写作。你的任务是根据全局大纲和上一集的记忆快照，撰写指定集数的完整剧本。
 
 ## 核心铁律（绝对禁止，违者重写）
 1. **禁止心理描写** - 不能写"他意识到"、"她感觉到"等
@@ -474,7 +432,7 @@ _WRITER_BASE_PROMPT = """你是一位专业电影编剧，精通视觉化写作�
 
 ## 剧本格式
 ```
-# 第 {episode_num} 集
+# 第 N 集
 【场景：地点/时间】（约X秒）
 角色A：台词。
 角色B：（冷笑）台词。
@@ -484,16 +442,14 @@ _WRITER_BASE_PROMPT = """你是一位专业电影编剧，精通视觉化写作�
 （情绪最高潮结尾）
 
 ═══════════════════════
-【第 {episode_num} 集完】
+【第 N 集完】
 ═══════════════════════
 ```
-
-请撰写第 {episode_num} 集的完整剧本。
 """
 
-# 多巴胺爽剧增强版
+# 多巴胺爽剧增强版（v5.0 缓存优化：动态变量移至 user prompt）
 _WRITER_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通视觉化写作，尤其擅长爆款微短剧。
-你的任务是：根据全局大纲和上一集的记忆快照，撰写【第 {episode_num} 集】的完整剧本。
+你的任务是：根据全局大纲和上一集的记忆快照，撰写指定集数的完整剧本。
 
 ## 🔥 多巴胺爽剧核心法则
 
@@ -532,12 +488,6 @@ _WRITER_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通视觉化写
   - 致命误解（新人物介入制造三角冲突）
   - 关键证据（有人掌握了主角的把柄）
 
-## 本集基本信息
-- **第 {episode_num} 集**（大结局集则情绪最强）
-- **全局大纲摘要**：{outline_summary}
-- **人物小传**：{character_settings}
-- **上一集记忆快照**：{memory_snapshot}
-
 ## 核心铁律（违者重写）
 1. **禁止心理描写** - 不能写"他意识到"、"她内心"等
 2. **禁止慢节奏铺垫** - 开场即冲突，3秒内必须出现
@@ -558,7 +508,7 @@ _WRITER_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通视觉化写
 
 ## 剧本格式（严格遵守）
 ```
-# 第 {episode_num} 集
+# 第 N 集
 
 【开场：地点/时间】（约X秒）
 [情节节奏：紧 | 情感节奏：重 | 悬念钩子：...]
@@ -573,11 +523,9 @@ _WRITER_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通视觉化写
 （卡在情绪最高点的结尾，吸引看下一集）
 
 ═══════════════════════
-【第 {episode_num} 集完】
+【第 N 集完】
 ═══════════════════════
 ```
-
-请撰写第 {episode_num} 集的完整剧本。
 """
 
 # =============================================================================
@@ -589,25 +537,13 @@ _WRITER_REVISION_BASE_PROMPT = """你是一位专业电影编剧，精通视觉�
 
 ## ⚠️ 你的任务是【定向精修】，而非全盘重写
 
-你必须仔细阅读以下「初稿剧本」和「导演修改意见」，然后**仅针对修改意见进行精修**。
+你必须仔细阅读 user prompt 中提供的「初稿剧本」和「导演修改意见」，然后**仅针对修改意见进行精修**。
 
 ## 核心原则（违反则重写）
 1. **保留优秀台词和动作** - 原剧本中不需要修改的部分，必须原样保留
 2. **精准定向修改** - 只改用户明确提出要改的地方
 3. **保持节奏完整** - 不能因为局部修改而破坏原有的冲突节奏和悬念钩子
 4. **视觉化叙事不变** - 仍然必须是摄影机能拍到的画面
-
-## 待修改内容
-
-### 【本集初稿剧本】
-{previous_script}
-
----
-
-### 【导演（用户）的修改意见】
-{user_feedback}
-
----
 
 ## 请按以下步骤执行
 
@@ -617,18 +553,16 @@ _WRITER_REVISION_BASE_PROMPT = """你是一位专业电影编剧，精通视觉�
 **步骤四**：输出完整的修改后剧本（不是只输出修改的部分）
 
 ## 输出要求
-1. 必须输出完整的第 {episode_num} 集剧本
-2. 保留原有的集分隔格式（【第 {episode_num} 集完】）
+1. 必须输出完整的剧本
+2. 保留原有的集分隔格式
 3. 在修改处简要标注「已根据意见调整」
-
-请精修第 {episode_num} 集的剧本。
 """
 
 _WRITER_REVISION_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通爆款竖屏微短剧。
 
 ## ⚠️ 你的任务是【定向精修】，而非全盘重写
 
-你必须仔细阅读以下「初稿剧本」和「导演修改意见」，然后**仅针对修改意见进行精修**。
+你必须仔细阅读 user prompt 中提供的「初稿剧本」和「导演修改意见」，然后**仅针对修改意见进行精修**。
 
 ## 🔥 多巴胺爽剧核心法则（必须遵守）
 - 不能削弱原有的情绪爽点
@@ -641,18 +575,6 @@ _WRITER_REVISION_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通爆
 3. **保持多巴胺节奏** - 不能因为局部修改而破坏原有的爽感节奏
 4. **保留 Cliffhanger** - 结尾的悬念钩子必须保留或增强
 
-## 待修改内容
-
-### 【本集初稿剧本】
-{previous_script}
-
----
-
-### 【导演（用户）的修改意见】
-{user_feedback}
-
----
-
 ## 请按以下步骤执行
 
 **步骤一**：逐一分析修改意见，确定哪些部分需要修改
@@ -661,43 +583,22 @@ _WRITER_REVISION_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通爆
 **步骤四**：输出完整的修改后剧本（不是只输出修改的部分）
 
 ## 输出要求
-1. 必须输出完整的第 {episode_num} 集剧本
+1. 必须输出完整的剧本
 2. 保留「开场15秒情绪压迫 → 30秒反击打脸 → 结尾新钩子」三段结构
-3. 保留原有的集分隔格式（【第 {episode_num} 集完】）
+3. 保留原有的集分隔格式
 4. 在修改处简要标注「已根据意见调整」
-
-请精修第 {episode_num} 集的剧本。
 """
 
 
-def _build_writer_revision_prompt(
-    script_format: str,
-    episode_num: int,
-    total_episodes: int,
-    outline_summary: str,
-    character_settings: str,
-    previous_summary: str,
-    memory_snapshot: str,
-    previous_script: str,
-    user_feedback: str,
-) -> str:
+def _build_writer_revision_prompt(script_format: str) -> str:
     """
-    构建编剧定向精修 Prompt（内部使用）。
+    v5.0 缓存优化版：构建编剧定向精修 system prompt（纯常量，无动态变量）。
+    所有动态内容（previous_script/user_feedback/episode_num 等）已移至 user prompt。
     """
     base = (
         _WRITER_REVISION_DOPAMINE_PROMPT
         if is_micro_drama_mode(script_format)
         else _WRITER_REVISION_BASE_PROMPT
-    )
-    base = base.format(
-        episode_num=episode_num,
-        total_episodes=total_episodes,
-        outline_summary=outline_summary,
-        character_settings=character_settings or "（暂无详细人物小传）",
-        previous_summary=previous_summary or "（本剧第1集，无前集摘要）",
-        memory_snapshot=memory_snapshot or "（首次创作，无历史记忆）",
-        previous_script=previous_script,
-        user_feedback=user_feedback,
     )
     # 【核心】动态 Prompt 路由：追加格式专属策略指令
     strategy = _get_format_strategy(script_format)
@@ -722,62 +623,34 @@ def build_writer_prompt(
     harness_memory_context: str = "",
 ) -> str:
     """
-    根据剧本格式构建编剧 Prompt。
-    竖屏微短剧模式注入多巴胺爽剧规则。
+    根据剧本格式构建编剧 system prompt（v5.0 缓存优化版）。
+
+    system prompt 现在是纯常量（规则+格式+质量标准），不含任何动态变量。
+    所有动态内容（集数、大纲、人物、记忆快照等）由调用方放入 user prompt。
+    这样同一格式的所有集数共用同一 system prompt 前缀 → 100% 缓存命中。
 
     Args:
         previous_script: 如果存在用户修改意见，此为之前的初稿剧本
         user_feedback: 用户的定向修改意见
-        harness_memory_context: Harness 结构化记忆注入（可选，不影响现有流程）
+        harness_memory_context: Harness 结构化记忆注入（v5.0: 由调用方处理，此参数保留兼容但不再注入 system prompt）
     """
     # 定向精修分支：用户提交了针对本集剧本的修改意见
     if previous_script and user_feedback:
-        return _build_writer_revision_prompt(
-            script_format=script_format,
-            episode_num=episode_num,
-            total_episodes=total_episodes,
-            outline_summary=outline_summary,
-            character_settings=character_settings,
-            previous_summary=previous_summary,
-            memory_snapshot=memory_snapshot,
-            previous_script=previous_script,
-            user_feedback=user_feedback,
-        )
+        return _build_writer_revision_prompt(script_format)
 
-    # 正常生成分支
-    if is_micro_drama_mode(script_format):
-        base = _WRITER_DOPAMINE_PROMPT.format(
-            episode_num=episode_num,
-            total_episodes=total_episodes,
-            outline_summary=outline_summary,
-            character_settings=character_settings or "（暂无详细人物小传）",
-            previous_summary=previous_summary or "（本剧第1集，无前集摘要）",
-            memory_snapshot=memory_snapshot or "（首次创作，无历史记忆）"
-        )
-    else:
-        base = _WRITER_BASE_PROMPT.format(
-            episode_num=episode_num,
-            total_episodes=total_episodes,
-            outline_summary=outline_summary,
-            character_settings=character_settings or "（暂无详细人物小传）",
-            previous_summary=previous_summary or "（本剧第1集，无前集摘要）",
-            memory_snapshot=memory_snapshot or "（首次创作，无历史记忆）"
-        )
+    # 正常生成分支：返回常量 system prompt
+    base = _WRITER_DOPAMINE_PROMPT if is_micro_drama_mode(script_format) else _WRITER_BASE_PROMPT
 
-    # 【核心】动态 Prompt 路由：追加格式专属策略指令
+    # 【核心】动态 Prompt 路由：追加格式专属策略指令（常量，按 format 固定）
     strategy = _get_format_strategy(script_format)
     suffix = strategy.get("writer_suffix", "")
     if suffix:
         base = base + "\n" + suffix
 
-    # Harness 结构化记忆注入（零侵入：无值时不追加任何内容）
-    if harness_memory_context:
-        base = base + "\n\n" + harness_memory_context
-
-    # P3-2：内容安全护栏注入
+    # P3-2：内容安全护栏注入（常量）
     base = base + "\n\n" + _get_safety_guardrail_text()
 
-    # Harness 工具 Schema 注入（自动获取标准 Writer 工具集）
+    # Harness 工具 Schema 注入（常量，按 agent 类型固定）
     base = _inject_tool_schema_if_available(base, "writer")
 
     return base
@@ -787,10 +660,6 @@ def build_writer_prompt(
 # 剧本医生 (Doctor Agent) - v4.0 多巴胺版
 # -----------------------------------------------------------------------------
 _DOCTOR_BASE_PROMPT = """你是一位严格的剧本医生和场记。你的职责是审查编剧的剧本，确保符合专业标准。
-
-## 审查基本信息
-- **当前集数**：第 {episode_num}/{total_episodes} 集
-- **全局摘要**：{outline_summary}
 
 ## 审查项目
 
@@ -836,18 +705,18 @@ _DOCTOR_BASE_PROMPT = """你是一位严格的剧本医生和场记。你的职�
 
 【记忆检查点】
 ═══════════════════════════════════
-📌 记忆检查点 | 第 {episode_num} 集完成 | {timestamp}
+📌 记忆检查点 | 第 N 集完成 | YYYY-MM-DD HH:MM:SS
 ═══════════════════════════════════
 
 【当前进度】
-- 已完成：第 {episode_num}/{total_episodes} 集
-- 下一集：第 {next_episode} 集
+- 已完成：第 N/Total 集
+- 下一集：第 N+1 集
 
 【角色当前状态】
 [根据本集内容更新]
 
 【本集摘要】
-{episode_summary}
+[由 user prompt 提供]
 
 【节奏状态】
 - 情节节奏：松/中/紧
@@ -922,7 +791,7 @@ _DOCTOR_DOPAMINE_PROMPT = """你是一位严格的剧本医生和场记，专门
 [具体告诉编剧怎么改才能更爽]
 
 ---
-请编剧根据以上反馈重写第 {episode_num} 集。
+请编剧根据以上反馈重写本集。
 ```
 
 ### 通过：
@@ -944,12 +813,12 @@ _DOCTOR_DOPAMINE_PROMPT = """你是一位严格的剧本医生和场记，专门
 
 【记忆检查点】
 ═══════════════════════════════════
-📌 记忆检查点 | 第 {episode_num} 集完成 | {timestamp}
+📌 记忆检查点 | 第 N 集完成 | YYYY-MM-DD HH:MM:SS
 ═══════════════════════════════════
 
 【当前进度】
-- 已完成：第 {episode_num}/{total_episodes} 集
-- 下一集：第 {next_episode} 集
+- 已完成：第 N/Total 集
+- 下一集：第 N+1 集
 
 【本集多巴胺爽点回顾】
 - 情绪压迫点：[主角被如何打压]
@@ -991,32 +860,20 @@ def _get_preflight_section(preflight_report_text: str, episode_content: str = ""
 
 def build_doctor_prompt(
     script_format: str,
-    episode_num: int,
-    total_episodes: int,
-    outline_summary: str,
-    episode_summary: str,
     episode_content: str = "",
     preflight_report_text: str = "",
 ) -> str:
     """
-    根据剧本格式构建医生 Prompt。
+    v5.0 缓存优化版：system prompt 现在是纯常量，不含任何动态变量。
+    所有动态内容（集数/大纲/摘要）已移至 user prompt。
+
     竖屏微短剧模式注入多巴胺爽剧审核规则。
 
     v0.3 优化：支持注入代码层预扫描报告（preflight_report_text）。
     当提供预扫描报告时，Doctor 从"肉眼扫描"模式切换为"基于代码证据的语义确认"模式，
     大幅降低 token 消耗并提升准确度。
     """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    next_episode = episode_num + 1
     base = _DOCTOR_DOPAMINE_PROMPT if is_micro_drama_mode(script_format) else _DOCTOR_BASE_PROMPT
-    base = base.format(
-        episode_num=episode_num,
-        total_episodes=total_episodes,
-        next_episode=next_episode,
-        outline_summary=outline_summary[:800] if outline_summary else "（全局大纲摘要）",
-        episode_summary=episode_summary,
-        timestamp=timestamp,
-    )
 
     # 【核心】动态 Prompt 路由：追加格式专属策略指令
     strategy = _get_format_strategy(script_format)
@@ -1201,12 +1058,18 @@ def run_showrunner_agent(
 
     if is_revision:
         # 定向修改模式：用户提交了修改意见
-        user_prompt = f"""## 原始创意
+        user_prompt = f"""## 剧本格式
+{script_format}
+
+## 原始创意
 {creative_idea}
 
 ## 修改指令
 制片人（用户）提出了以下修改意见：
 {user_feedback}
+
+## 初稿大纲
+{previous_outline}
 
 请根据以上修改意见，对初稿大纲进行定向精修。
 规则：
@@ -1300,7 +1163,20 @@ def run_episode_writer_agent(
     )
 
     if is_revision:
-        user_prompt = f"""请根据以下修改意见，对《第 {episode_num} 集》的剧本进行定向精修。
+        user_prompt = f"""## 本集基本信息
+- **第 {episode_num} 集**（全剧共 {total_episodes} 集）
+- **全局大纲摘要**：{outline_summary}
+- **人物小传**：{character_settings or "（暂无详细人物小传）"}
+- **上一集记忆快照**：{memory_snapshot or "（首次创作，无历史记忆）"}
+- **上一集摘要**：{previous_summary or "（本剧第1集，无前集摘要）"}
+
+## 待精修剧本
+{previous_script}
+
+## 修改意见
+{user_feedback}
+
+请根据以上修改意见，对《第 {episode_num} 集》的剧本进行定向精修。
 
 要求：
 1. 只修改需要修改的部分，保留优秀台词和动作
@@ -1309,7 +1185,19 @@ def run_episode_writer_agent(
 4. 输出完整的第 {episode_num} 集剧本（不是只输出修改的部分）
 """
     else:
-        user_prompt = f"""请撰写《第 {episode_num} 集》的完整剧本。
+        # v5.0: 所有动态内容移入 user prompt，system prompt 保持常量以命中缓存
+        harness_section = ""
+        if harness_memory_context:
+            harness_section = f"\n## 结构化记忆上下文\n{harness_memory_context}\n"
+
+        user_prompt = f"""## 本集基本信息
+- **第 {episode_num} 集**（全剧共 {total_episodes} 集）
+- **全局大纲摘要**：{outline_summary}
+- **人物小传**：{character_settings or "（暂无详细人物小传）"}
+- **上一集记忆快照**：{memory_snapshot or "（首次创作，无历史记忆）"}
+- **上一集摘要**：{previous_summary or "（本剧第1集，无前集摘要）"}
+{harness_section}
+请撰写《第 {episode_num} 集》的完整剧本。
 
 要求：
 1. 满足 1-2 分钟的成片体量（约 400-500 字）
@@ -1383,16 +1271,19 @@ def run_episode_doctor_agent(
 
     next_ep_note = f"第 {episode_num + 1} 集" if episode_num < total_episodes else "（大结局）"
 
-    user_prompt = f"""## 待审查剧本：第 {episode_num} 集
+    user_prompt = f"""## 本集基本信息
+- **第 {episode_num} 集**（全剧共 {total_episodes} 集）
+- **下一集**：{next_ep_note}
+- **全局大纲摘要**：{outline_summary[:800] if outline_summary else "（全局大纲摘要）"}
+- **本集摘要**：{get_episode_summary(episode_content)}
+
+## 待审查剧本：第 {episode_num} 集
 
 {episode_content}
 
 ---
 
 请按照审查标准检查以上内容，并给出审查结果。
-
-当前集数：第 {episode_num}/{total_episodes} 集
-下一集：{next_ep_note}
 """
 
     result = call_llm(
@@ -1400,10 +1291,6 @@ def run_episode_doctor_agent(
         model=model,
         system_prompt=build_doctor_prompt(
             script_format=script_format,
-            episode_num=episode_num,
-            total_episodes=total_episodes,
-            outline_summary=outline_summary,
-            episode_summary=get_episode_summary(episode_content),
             episode_content=episode_content,
             preflight_report_text=preflight_text,
         ),
