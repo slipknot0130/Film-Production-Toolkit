@@ -449,21 +449,27 @@ def count_internal_external_scenes(script_text: str) -> tuple:
 
 def generate_duration_guide(script_text: str) -> str:
     """
-    v2.2：代码层分析剧本体量，生成分镜时长/镜数推荐。
+    v2.3：代码层分析剧本体量，生成分镜时长/镜数推荐（参考值，非硬性约束）。
     纯算法计算 — 字数统计、对白密度、场景数量 — 不做任何语义判断。
 
     返回格式化的推荐字符串，直接注入 Director Agent 的 prompt。
-    让 LLM 根据数据规划分镜，而非依赖硬编码的"1300字→8分钟"固定示例。
+    让 LLM 根据数据参考自主规划分镜，而非依赖硬编码的固定示例。
+
+    v2.3 修正（2026-07-21）：
+      - 新增「屏幕内容字符」计算：排除场标、角色名前缀等格式字符，只统计对白+动作描述
+      - 新增硬上限：单切块最多80镜，且不超过 屏幕内容字符/15（确保每镜有足够的视觉内容）
+      - 措辞从"严格按此范围规划"改为"作为参考，Agent自主判断合理分镜数"
 
     核心公式：
-      有效字符 ÷ 3.5 = 纯阅读秒数
+      屏幕内容字符 ÷ 5.5 = 纯阅读秒数（剧本比小说稀疏，5.5字/秒更合理）
       纯阅读秒数 × 表演膨胀系数 = 预估总时长
       预估总时长 ÷ 平均镜秒 = 预估镜数
+      预估镜数 × 上限系数 → 硬上限裁剪
 
     表演膨胀系数取决于对白密度：
-      - 对话为主 (>60%对白行) → ×1.8（节奏快）
-      - 均衡 (30-60%) → ×2.2
-      - 动作为主 (<30%) → ×2.5（镜头密度高）
+      - 对话为主 (>60%对白行) → ×1.5（对话节奏快，不需要大幅膨胀）
+      - 均衡 (30-60%) → ×1.8
+      - 动作为主 (<30%) → ×2.0（视觉密度高但上限收紧）
     """
     # ── 1. 文本量统计 ──
     stripped = script_text.strip()
@@ -472,6 +478,22 @@ def generate_duration_guide(script_text: str) -> str:
 
     total_chars = len(stripped)
     effective_chars = len(re.sub(r'\s+', '', stripped))
+
+    # ── 1.5 屏幕内容字符（排除场标/角色前缀等格式开销）──
+    # 去掉「第X场」格式行和场景标记行
+    content_only = re.sub(r'第\s*(?:[一二三四五六七八九十百\d]+)\s*(?:场|幕|景)[^\n]*\n?', '', stripped)
+    content_only = re.sub(r'(?:INT|EXT|内景|外景|日内|夜内|日外|夜外)[^\n]*\n?', '', content_only)
+    # 去掉角色名前缀（如"钱阿龙："），只保留对白内容
+    content_only = re.sub(r'([\u4e00-\u9fa5A-Za-z0-9]+)[：:]\s*', '', content_only)
+    # 去掉括号内的动作提示
+    content_only = re.sub(r'[（(][^）)]*[）)]', '', content_only)
+    # 有效屏幕内容字符（去空格）
+    screen_content_chars = len(re.sub(r'\s+', '', content_only))
+    # 如果过滤后太少（<30%），回退到原始 effective_chars 的 65%
+    if screen_content_chars < effective_chars * 0.3:
+        screen_content_chars = int(effective_chars * 0.65)
+    # 保底
+    screen_content_chars = max(screen_content_chars, 50)
 
     # ── 2. 对白统计 ──
     all_dialogue = CHARACTER_DIALOGUE_PATTERN.findall(stripped)
@@ -488,35 +510,35 @@ def generate_duration_guide(script_text: str) -> str:
     total_lines = len(non_empty_lines)
     action_lines = max(total_lines - dialogue_lines, 1)
 
-    # ── 4. 场景统计（含第N场格式兜底）──
+    # ── 4. 场景统计（含第N场格式兜底 + 场景名 时间 内外 格式）──
     scene_count = count_scenes_code(stripped) or 0
-    # 兜底：count_scenes_code 只匹配 INT/EXT/内景/外景 等标记，
-    # 不匹配「第X场」格式。这里用简单正则补上。
     chinese_scene_matches = re.findall(r'第\s*(?:[一二三四五六七八九十百\d]+)\s*(?:场|幕|景)', stripped)
-    scene_count = max(scene_count, len(chinese_scene_matches), 1)
+    # 新增：匹配 "场景名 日/夜/晨 内/外" 格式（如"黑水林 夜 外"）
+    scene_name_time_matches = re.findall(r'(?:^|\n)[\u4e00-\u9fa5A-Za-z]+[ ]+(?:日|夜|晨|昏|凌晨|傍晚)[ ]*(?:内|外)(?:\n|$)', stripped, re.MULTILINE)
+    scene_count = max(scene_count, len(chinese_scene_matches), len(scene_name_time_matches), 1)
 
-    # ── 5. 对白密度与膨胀系数 ──
+    # ── 5. 对白密度与膨胀系数（v2.3：整体下调膨胀系数）──
     if dialogue_lines > 0 and total_lines > 0:
         dialogue_ratio = dialogue_lines / total_lines
     else:
         dialogue_ratio = 0.0
 
     if dialogue_ratio > 0.6:
-        expansion = 1.8
+        expansion = 1.5
         pace_label = "对话主导型"
         pace_hint = "对话节奏快，一镜到底对话场景5-8s/镜，其余4-5s/镜（每镜一个主要动作或一次镜头变化）"
     elif dialogue_ratio > 0.3:
-        expansion = 2.2
+        expansion = 1.8
         pace_label = "均衡型"
         pace_hint = "文戏动作交替，标准镜长4-6s/镜（复杂剧情12-15s或拆多镜）"
     else:
-        expansion = 2.5
+        expansion = 2.0
         pace_label = "动作主导型"
         pace_hint = "视觉密度高，武戏2-3s/镜，其余4-5s/镜（每镜不超过一个主要动作）"
 
-    # ── 6. 时长估算 ──
-    # 纯阅读秒数（中文约3.5字/秒正常讲述节奏）
-    reading_seconds = max(effective_chars / 3.5, 10.0)
+    # ── 6. 时长估算（v2.3：用屏幕内容字符替代有效字符）──
+    # 中文剧本约5.5字/秒正常讲述节奏（比3.5字/秒更合理：剧本含大量格式化内容）
+    reading_seconds = max(screen_content_chars / 5.5, 10.0)
     estimated_duration = reading_seconds * expansion
 
     # ── 7. 镜数估算 ──
@@ -532,6 +554,23 @@ def generate_duration_guide(script_text: str) -> str:
     # 上下浮动范围
     min_shots = max(int(estimated_shots * 0.75), scene_count * 2)
     max_shots = int(estimated_shots * 1.35)
+
+    # ── 7.5 v2.3 硬上限裁剪（v2.3.1：进一步收紧，解决短剧本超时）──
+    # 规则1：单切块绝对上限50镜（短剧本不应超过50镜）
+    ABSOLUTE_MAX_SHOTS = 50
+    # 规则2：基于屏幕内容密度上限：每35字最多1镜（确保每镜有足够视觉内容支撑80字描述）
+    density_max_shots = max(screen_content_chars // 35, scene_count * 3)
+    # 规则3：短剧本额外限制（<2500字内容直接封顶35镜，防止短剧分镜过碎）
+    if screen_content_chars < 2500:
+        short_script_max = 35
+    else:
+        short_script_max = 9999
+    # 取四者最小值
+    max_shots = min(max_shots, ABSOLUTE_MAX_SHOTS, density_max_shots, short_script_max)
+    # 确保 min ≤ max 且不低于场景数×2
+    min_shots = min(min_shots, max_shots - 1)
+    min_shots = max(min_shots, scene_count * 2, 3)
+
     min_duration = int(estimated_duration * 0.8)
     max_duration = int(estimated_duration * 1.25)
 
@@ -541,19 +580,22 @@ def generate_duration_guide(script_text: str) -> str:
             return f"{m}分{sec}秒"
         return f"{sec}秒"
 
-    # ── 8. 组装推荐文本 ──
+    # ── 8. 组装推荐文本（v2.3 措辞改为参考而非严格）──
     guide = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【剧本体量分析 — 代码自动计算】
+【剧本体量分析 — 代码参考范围】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  本切块统计：{effective_chars}有效字符 / {scene_count}场 / {dialogue_lines}句对白({dialogue_total_chars}字) / {action_lines}行动作描述
+  本切块统计：{effective_chars}总字符 / 约{screen_content_chars}屏幕内容字符 / {scene_count}场 / {dialogue_lines}句对白({dialogue_total_chars}字) / {action_lines}行动作描述
   对白密度：{dialogue_ratio:.0%} → {pace_label}（{pace_hint}）
-  建议总时长：{format_dur(min_duration)} ～ {format_dur(max_duration)}
-  建议总镜数：{min_shots} ～ {max_shots} 镜
+  参考总时长：{format_dur(min_duration)} ～ {format_dur(max_duration)}
+  参考总镜数：{min_shots} ～ {max_shots} 镜
   平均镜长：约{avg_shot_sec:.0f}秒/镜
 
-  以上参数基于剧本实际体量由代码精确计算，请严格按此范围规划分镜。
-  
+  以上为代码参考范围，请结合剧本实际节奏和戏剧密度自主判断合理分镜数。
+  · 短剧本/动作密集段落 → 少镜+长镜，画面内容要丰富（不要为凑数拆分连贯动作）
+  · 长对话段落 → 可适当多镜，但要确保每镜都有独立的视觉价值
+  · 核心原则：宁可少出几个高质量镜头，也不要出一堆薄弱的凑数镜头
+
   Seedance 2.0 时长铁律：
   · 4-5秒/镜 = 一个主要动作或一次镜头变化（严禁塞入多个动作）
   · 一镜到底对话 = 5-8秒、正面、1-2句短台词

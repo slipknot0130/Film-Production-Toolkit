@@ -10,6 +10,27 @@ import os
 import subprocess
 
 
+# 强制 UTF-8 编码环境（Windows 双点击启动时常为 GBK/ASCII，导致中文日志和 API 请求异常）
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+if sys.platform == "win32":
+    os.environ.setdefault("LC_ALL", "C.UTF-8")
+    try:
+        import locale
+        locale.setlocale(locale.LC_ALL, "C.UTF-8")
+    except Exception:
+        pass
+    # 确保 stdout/stderr 可写中文
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+
 def main():
     # Switch to the directory where this script lives
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -65,26 +86,26 @@ def main():
     # --- Find available port ---
     import socket
     port = None
-    for try_port in range(8501, 8520):
+    # 使用 8590-8609，避开 Windows 系统保留端口范围 8455-8554
+    for try_port in range(8590, 8610):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind(("127.0.0.1", try_port))
+            sock.bind(("0.0.0.0", try_port))
             sock.close()
             port = try_port
             break
-        except OSError:
+        except OSError as e:
             sock.close()
-            continue
+            if e.winerror == 10013:
+                continue  # 系统保留端口，静默跳过
+            continue       # 端口被占用，试下一个
 
     if port is None:
-        print("[ERROR] Ports 8501-8519 are all in use!")
+        print("[ERROR] Ports 8590-8609 are all in use!")
         print("        Please close other Streamlit apps or free up a port.")
         input("Press Enter to exit...")
         sys.exit(1)
-
-    if port != 8501:
-        print(f"[WARN] Port 8501 in use, switching to {port}")
 
     print()
     print(f"[INFO] Starting Streamlit on port {port}...")

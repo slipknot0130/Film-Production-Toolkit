@@ -14,8 +14,21 @@ import streamlit as st
 import json
 import re
 import os
+import sys
+import traceback
 import httpx
 from openai import OpenAI
+
+
+def _safe_print(msg: str):
+    """跨平台安全打印：Windows 控制台/管道非 UTF-8 时回退到 errors='replace'"""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        try:
+            sys.stdout.buffer.write(msg.encode("utf-8", errors="replace") + b"\n")
+        except Exception:
+            pass
 
 
 # =============================================================================
@@ -149,14 +162,16 @@ def call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.0,
             last_error = str(e)
             # 保存原始响应用于调试
             raw_preview = res[:200] if 'res' in dir() else "N/A"
-            print(f"[call_llm_json] 尝试 {attempt + 1}/{max_retries} 失败: {last_error}")
-            print(f"[call_llm_json] 原始响应预览: {raw_preview}...")
+            tb = traceback.format_exc()
+            _safe_print(f"[call_llm_json] 尝试 {attempt + 1}/{max_retries} 失败: {last_error}")
+            _safe_print(f"[call_llm_json] 原始响应预览: {raw_preview}...")
+            _safe_print(f"[call_llm_json] Traceback:\n{tb}")
 
             if attempt < max_retries - 1:
                 st.toast(f"⚠️ JSON 解析遇到错误，正在启动第 {attempt + 2} 次自动重试...")
             else:
                 st.error(f"❌ 大模型连接或解析失败，已达最大重试次数（{max_retries}次）。错误详情: {last_error}")
-                print(f"[call_llm_json] 最终失败，返回空字典。最后错误: {last_error}")
+                _safe_print(f"[call_llm_json] 最终失败，返回空字典。最后错误: {last_error}")
 
     # 所有重试均失败，返回最小可用结果
     return {}
