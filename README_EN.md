@@ -142,6 +142,80 @@ Final output is standard JSON array, directly renderable as DataFrame table:
 | Shot # / Timecode / Shot Size · Position · Motion (fused description) / Base Setup Tag |
 | **Final Seedance Prompt** | A complete text block ready to paste directly into Seedance 2.0. Structure: [Base Setup] (character appearance/costume/environment/image quality defined once) + [Frame Content] Shot N: timecode + high-density visual description (character details/environment lighting/camera trajectory/material interaction/lens simulation keywords). Professional case-level density, no manual post-processing needed |
 
+#### 🎯 Director Intent Engine `felt_intent` (v4.3 NEW)
+
+Each shot carries an independent director intent field that drives the global choice of shot size, camera position, and motion — informed by Seedance 2.0 Skill OS `directing-engine` + `felt-intent`:
+
+| Intent Type | Example | Driven Visual Settings |
+|------------|---------|----------------------|
+| **Reveal** | "Make the audience notice the scar on his hand" | Mid-shot → slow push to close-up + side light for texture |
+| **Oppression** | "Make her appear small and helpless in frame" | High-angle wide shot + disproportionate environment scale |
+| **Intimacy** | "Close the unspoken distance between them" | Shallow DOF two-shot + slow rack focus + warm diffused light |
+
+> "A reveal is not lit, framed, blocked, or performed like a farewell." — Seedance 2.0 core principle
+
+#### 🚫 Systematic Anti-Slop Lexicon (v4.3 NEW)
+
+Informed by `anti-slop-lexicon.md`. 4 categories of banned words + specific alternative guides. Double-locked by both Director and QA:
+
+| Category | Banned Examples | Correct Approach |
+|----------|----------------|-----------------|
+| **Inflated Words** | cinematic, epic, stunning, breathtaking | Provide concrete visual sources and light/shadow details |
+| **Empty Boosters** | high quality, masterpiece, 8k, 4k | Describe material texture, light direction, resolution causation |
+| **Abstract Labels** | emotional, beautiful, atmospheric | List visible evidence: color, light, action |
+| **Vague Words** | warm, oppressive, ambiguous, cheap, terrifying, romantic | Transcribe as color temp, spatial scale, character distance |
+
+#### 🎥 Enhanced Lens · Motion · Lighting Vocabulary (v4.3 NEW)
+
+Extracted from Seedance 2.0 `seedance-camera` + `seedance-motion` + `seedance-lighting` references, injected into Director Agent:
+
+| Vocabulary Type | Before | v4.3 | New Capabilities |
+|----------------|:---:|:---:|-----------------|
+| **Shot Size** | 6 | **11** | Dutch Angle, OTS, Subjective POV, ECU, Establishing Shot |
+| **Camera Motion** | 8 | **11** | Parallax Slide, Dolly Zoom, Reaction Shot, Discovery Shot |
+| **Camera Position** | Basic | **6** | Each annotated with emotional meaning (low angle = authority/threat, high angle = insignificance, eye level = empathy) |
+| **Light Sources** | — | **6** | Key, Fill, Rim, Ambient, Practical, Bounce |
+| **Color Temp** | — | **4 families** | Cool (6500K+) / Neutral (4500–5500K) / Warm (2700–3500K) / Ultra-warm (<2000K), with time-of-day cues |
+
+#### 🧠 Model Mechanics Injection (v4.3.1 NEW)
+
+Adapted from Seedance 2.0 `model-mechanics.md`. Agents now understand **why** rules work, not just what they are:
+
+| Mechanism | What's Injected |
+|-----------|----------------|
+| **Fidelity Budget** | Gen-1 allocates limited fidelity — don't waste it on non-critical regions; concentrate on frame core |
+| **Positional Weight** | Prompt opening > middle > end → place critical features first in Section 1 subject anchoring |
+| **Capability Map** | Strengths: material textures, light interaction, fluid motion, micro detail. Weaknesses: precise text, fingers, complex spatial relations |
+| **Consistency > Complexity** | Prefer simplified settings with solid character consistency over complex environments with character drift |
+
+#### 🔄 Reshoot Decision Protocol (v4.3.1 NEW)
+
+QA upgraded from binary pass/fail to 4-tier quality grading + targeted retake strategy:
+
+| Quality Tier | Threshold | Action |
+|-------------|:---:|--------|
+| **Tier A** | ≥90% | Pass directly, minor tweaks only |
+| **Tier B** | 80–89% | Pass, flag improvement points for next round |
+| **Tier C** | 60–79% | **Single-variable retake**: fix only the biggest problem, don't touch other dimensions |
+| **Tier D** | <60% | Full retake, preserve scene definition and character info |
+
+- **Single-Variable Principle**: Change only one dimension at a time (light / composition / action) to avoid cascade damage
+- **Attempt Budget**: Max 2 retakes per shot; exceeding triggers human review flag, no infinite loops
+
+#### 📊 Event Density Firewall (v4.3 NEW)
+
+QA Agent enforces a mathematical model:
+
+```
+Independent Events / Shot Duration (sec) > 0.5  →  Overloaded → Split shot or extend duration
+```
+
+Eliminates the common AI issue: cramming multiple independent actions + camera changes into a 4-5 second shot.
+
+#### 🔌 Multimodal Reference Extension Points (v4.3.1 Reserved)
+
+Reserved `@Image` / `@Video` / `@Audio` reference syntax interface (`_resolve_multimodal_references()` stub function). Future I2V / V2V integration won't require refactoring the core storyboard logic. Zero impact in current text-only T2V mode.
+
 ---
 
 ### 🔧 Harness Engineering Layer (v0.2.0)
