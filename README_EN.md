@@ -30,6 +30,17 @@ Film Production Toolkit is a multi-agent collaboration system for professional s
 - **HITL Targeted Revision**: Submit revision notes for outline/episodes — Agents refine specifically, not rewrite everything
 - **5 Script Formats**: Vertical micro-drama / Short drama / Mid-length drama / Long drama / Feature film
 
+#### Creation Workbench UI
+
+Enter core concept and creative direction in the left-side **Inspiration & Control** panel. After clicking "Launch Multi-Agent Writers' Room", the right-side **Script Output** area dynamically generates:
+
+| Output Tab | Content |
+|-----------|---------|
+| 🗺️ **Global Outline** | Story spine, episode summaries, pacing curve, core conflict nodes |
+| 👤 **Character Profiles** | Major character bios, goals, Ghost/Lie/Flaw, relationship network |
+| 📄 **Script Body** | Full episode script in selected format, supports continuous generation |
+| 💾 **Memory Snapshot** | Current creation checkpoint; can rollback or resume anytime |
+
 ### 🎬 Script Analysis Engine (Format-Aware Dual-Track Review)
 
 The system **automatically detects** the drama type based on text volume and applies differentiated review standards:
@@ -40,14 +51,66 @@ The system **automatically detects** the drama type based on text volume and app
 | Mid-length / Long drama | 📐 Structure-oriented | Four-act structure, logical consistency, character arcs, twists & foreshadowing |
 | Feature Film | 🎥 Hollywood Industry | Save the Cat 15 beats, Ghost/Lie/Flaw, McKee scene value transition |
 
+#### Smart Format Detection UI
+
+After importing a script, the system automatically displays recognition results at the top:
+
+| Detection Dimension | Example Output |
+|--------------------|----------------|
+| **Detected Type** | Feature Film / Short Drama / Micro-Drama / Mid-length Drama / Long Drama |
+| **Total Characters** | 25,777 chars |
+| **Episodes** | No episode markers detected / N episodes total |
+
+#### Review Mode Selection
+
+Users can manually switch or accept the system recommendation:
+
+| Mode | Toggle | Best For |
+|------|:------:|:---------|
+| 🎭 Emotion-oriented Review | Toggle | Micro-drama / Short drama |
+| 📐 Structure-oriented Review | Toggle | Mid-length / Long drama |
+| 🎥 Hollywood Industry Review | Toggle | Feature film |
+
+Click "Launch Script Doctor Analysis" and the Doctor Agent outputs a structured diagnosis based on the active review mode.
+
 ### 💰 Budget Audit Engine
 
 - **Executive Producer Audit**: Line-by-line cost burning detection + AI replacement strategies
 - **Professional Production Budget**: Crew scale, daily rates, per-scene cost breakdowns, location recommendations
 
+#### Budget Workbench UI
+
+After loading a script, the system shows "Script loaded, X characters" and offers two independent pipelines:
+
+| Pipeline | Button | Output |
+|----------|--------|--------|
+| **Executive Producer Audit** | "Launch Budget Audit Pipeline" | Cost-burning points list, AI cost-saving alternatives, cuttable items |
+| **Professional Production Budget** | "Launch Professional Production Budget Pipeline" | Chinese film-industry crew budget table, scene difficulty analysis, domestic location recommendations, full executable budget |
+
 ### 📋 Scene Breakdown Engine
 
 OCD-level continuity supervision — Deconstruct every scene by physical space, extract prop lists and wardrobe requirements.
+
+#### Scene Breakdown Master Table (Physical Space Deconstruction)
+
+Click "Launch Continuity Supervision Pipeline" and the system deconstructs the script into physical scenes, outputting switchable breakdown tables:
+
+| Table View | Sort Order |
+|------------|-----------|
+| 📜 **Sequential Scene List** | Story order |
+| 🏠 **By Scene Location** | Grouped by scene name |
+
+**Example row fields:**
+
+| # | Scene Name | Int/Ext | Day/Night | Characters | Physical Props List | Special Wardrobe |
+|:-:|:----------:|:-------:|:---------:|:----------:|:-------------------:|:----------------:|
+| 1 | Outside Building | Ext | Night | Protagonist | Building, backpack, smartwatch, street, scattered cars | Coder plaid shirt |
+| 2 | Brain Command Room | Int | Night | Brain | Nutrient fluid, neural cables, pearl-shaped brain model | None |
+| 3 | Protagonist's Home | Int | Night | Protagonist | Door, backpack, sofa | Coder plaid shirt |
+
+> Continuity rule: list only physical props and special wardrobe. No plot summaries.
+
+The table supports Excel export and can be handed directly to the production team.
 
 ### 🎥 AI Video Storyboard Prompt Engine (Seedance 2.0 Compatible · Industrial-Grade Multi-Agent Generation)
 
@@ -133,6 +196,15 @@ Automatically converts literary abstract emotions into **shootable physical acti
 - Drama dialogue: Auto-insert **reaction shots** every 2–3 lines, focusing on listener's expression
 - Action: Rapid shot-size jumps (ECU → Wide → Side) to build tension
 
+#### Storyboard Workbench UI
+
+After loading a script and launching the CrewAI 4-Agent pipeline, the workbench outputs:
+
+| Area | Content |
+|------|---------|
+| 🎨 **Global Atmosphere & Image Quality Setup** | Expandable panel: style tone, color theme, lighting style, unified image-quality tokens — the visual bible for the entire storyboard |
+| 🎬 **Seedance 2.0 Storyboard Matrix** | Standard table: Shot # / Timecode / Shot Size · Position · Motion / Final Seedance Prompt, with one-click Excel download |
+
 #### 5-Column Seedance 2.0 Final Prompt Output
 
 Final output is standard JSON array, directly renderable as DataFrame table:
@@ -140,7 +212,7 @@ Final output is standard JSON array, directly renderable as DataFrame table:
 | Column | Content |
 |--------|---------|
 | Shot # / Timecode / Shot Size · Position · Motion (fused description) / Base Setup Tag |
-| **Final Seedance Prompt** | A complete text block ready to paste directly into Seedance 2.0. Structure: [Base Setup] (character appearance/costume/environment/image quality defined once) + [Frame Content] Shot N: timecode + high-density visual description (character details/environment lighting/camera trajectory/material interaction/lens simulation keywords). Professional case-level density, no manual post-processing needed |
+| **Final Seedance Prompt** | A complete text block ready to paste directly into Seedance 2.0. Structure: [Director Intent] + [Subject & Feature Anchoring] + [Reference Relation & Sub-task] + [Dynamic Description] + [Static Description]. Professional case-level density, no manual post-processing needed |
 
 #### 🎯 Director Intent Engine `felt_intent` (v4.3 NEW)
 
