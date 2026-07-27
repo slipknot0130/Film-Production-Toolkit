@@ -41,6 +41,8 @@ Enter core concept and creative direction in the left-side **Inspiration & Contr
 | 📄 **Script Body** | Full episode script in selected format, supports continuous generation |
 | 💾 **Memory Snapshot** | Current creation checkpoint; can rollback or resume anytime |
 
+![Script Creation UI](assets/images/剧本创作.png)
+
 ### 🎬 Script Analysis Engine (Format-Aware Dual-Track Review)
 
 The system **automatically detects** the drama type based on text volume and applies differentiated review standards:
@@ -73,6 +75,8 @@ Users can manually switch or accept the system recommendation:
 
 Click "Launch Script Doctor Analysis" and the Doctor Agent outputs a structured diagnosis based on the active review mode.
 
+![Script Analysis UI](assets/images/剧本分析.png)
+
 ### 💰 Budget Audit Engine
 
 - **Executive Producer Audit**: Line-by-line cost burning detection + AI replacement strategies
@@ -86,6 +90,8 @@ After loading a script, the system shows "Script loaded, X characters" and offer
 |----------|--------|--------|
 | **Executive Producer Audit** | "Launch Budget Audit Pipeline" | Cost-burning points list, AI cost-saving alternatives, cuttable items |
 | **Professional Production Budget** | "Launch Professional Production Budget Pipeline" | Chinese film-industry crew budget table, scene difficulty analysis, domestic location recommendations, full executable budget |
+
+![Budget Audit UI](assets/images/预算审计.png)
 
 ### 📋 Scene Breakdown Engine
 
@@ -111,6 +117,8 @@ Click "Launch Continuity Supervision Pipeline" and the system deconstructs the s
 > Continuity rule: list only physical props and special wardrobe. No plot summaries.
 
 The table supports Excel export and can be handed directly to the production team.
+
+![Scene Breakdown UI](assets/images/场景表拆解.png)
 
 ### 🎥 AI Video Storyboard Prompt Engine (Seedance 2.0 Compatible · Industrial-Grade Multi-Agent Generation)
 
@@ -204,6 +212,8 @@ After loading a script and launching the CrewAI 4-Agent pipeline, the workbench 
 |------|---------|
 | 🎨 **Global Atmosphere & Image Quality Setup** | Expandable panel: style tone, color theme, lighting style, unified image-quality tokens — the visual bible for the entire storyboard |
 | 🎬 **Seedance 2.0 Storyboard Matrix** | Standard table: Shot # / Timecode / Shot Size · Position · Motion / Final Seedance Prompt, with one-click Excel download |
+
+![Storyboard Workbench UI](assets/images/分镜工作台.png)
 
 #### 5-Column Seedance 2.0 Final Prompt Output
 
@@ -457,6 +467,9 @@ Film-Production-Toolkit/
 ├── requirements.txt         # Python dependencies
 ├── .env.example             # Environment variable template (API keys etc.)
 ├── StyleTokens.txt          # Global art style tokens (for storyboard)
+│
+├── assets/                   # 📸 UI screenshots & static resources
+│   └── images/               # README showcase screenshots
 │
 ├── harness/                  # 🔧 Harness Engineering Layer (v0.2.0)
 │   ├── __init__.py           # Module entry, version v0.2.0
