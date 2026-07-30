@@ -224,6 +224,26 @@ Final output is standard JSON array, directly renderable as DataFrame table:
 | Shot # / Timecode / Shot Size · Position · Motion (fused description) / Base Setup Tag |
 | **Final Seedance Prompt** | A complete text block ready to paste directly into Seedance 2.0. Structure: [Director Intent] + [Subject & Feature Anchoring] + [Reference Relation & Sub-task] + [Dynamic Description] + [Static Description]. Professional case-level density, no manual post-processing needed |
 
+#### 🎯 Storyboard Target Duration (Density) Control (v4.6 NEW)
+
+A new "🎯 Storyboard Target Duration (Density)" sub-option in the storyboard workbench sidebar lets the same script be broken down into shots at different densities according to the target episode length:
+
+| Option | Target Episode Length | Use Case |
+|--------|:---:|----------|
+| Auto (by script word count density) | Derived from word count (~1 shot / 24 chars) | Let the program adapt to script volume |
+| Short Drama · 2 min/ep | 2 min | Short drama: fewer, longer shots |
+| Vertical Short · 3 min/ep | 3 min | Vertical micro-drama |
+| Standard · 10 min/ep | 10 min | Regular web series episode |
+| Long Drama · 45 min/ep | 45 min | Long drama: many, dense shots |
+| Custom | 0.5–180 min | Any target length |
+
+**How it works:**
+- Once a target is selected, the program derives the **shot count** from `target seconds ÷ average shot seconds` (average shot seconds is a fixed reference assumption: 4.5s dialogue-heavy / 5.0s balanced / 4.0s action-heavy) and enforces it as a hard floor for the Director — under-splitting is forbidden.
+- In chunked mode, each chunk receives a share of the target duration **proportional to its character count**, ensuring overall density is met for long scripts; each chunk stays within the safe cap of 28 shots (prevents 8K token output truncation).
+- **Reference duration ≠ forced duration**: the program only outputs the reference duration and the corresponding shot count; the actual length of each shot in Jimeng (Seedance) is set by you. For a short script (~5000 chars), the 45-min preset yields at most ~252 shots (~17 min reference); the UI warns "script too short" and will not pretend to hit the target — you can then lengthen individual shots in Jimeng to fill the final runtime.
+
+**QA safety net:** the QA Agent adds a "shot-count floor review" — if the actual output falls below the hard floor, it is flagged as failed and sent back for re-splitting.
+
 #### 🎯 Director Intent Engine `felt_intent` (v4.3 NEW)
 
 Each shot carries an independent director intent field that drives the global choice of shot size, camera position, and motion — informed by Seedance 2.0 Skill OS `directing-engine` + `felt-intent`:
