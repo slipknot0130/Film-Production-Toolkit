@@ -555,14 +555,14 @@ def generate_duration_guide(script_text: str) -> str:
     min_shots = max(int(estimated_shots * 0.75), scene_count * 2)
     max_shots = int(estimated_shots * 1.35)
 
-    # ── 7.5 v2.3 硬上限裁剪（v2.3.1：进一步收紧，解决短剧本超时）──
-    # 规则1：单切块绝对上限50镜（短剧本不应超过50镜）
-    ABSOLUTE_MAX_SHOTS = 50
+    # ── 7.5 v2.3 硬上限裁剪（v2.4：进一步压低上限，解决长输出超时/token截断）──
+    # 规则1：单切块绝对上限30镜（过长输出会触发 LLM 超时与 8K token 截断，且稀释单镜质量）
+    ABSOLUTE_MAX_SHOTS = 30
     # 规则2：基于屏幕内容密度上限：每35字最多1镜（确保每镜有足够视觉内容支撑80字描述）
     density_max_shots = max(screen_content_chars // 35, scene_count * 3)
-    # 规则3：短剧本额外限制（<2500字内容直接封顶35镜，防止短剧分镜过碎）
+    # 规则3：短剧本额外限制（<2500字内容直接封顶20镜，防止短剧分镜过碎且降低超时风险）
     if screen_content_chars < 2500:
-        short_script_max = 35
+        short_script_max = 20
     else:
         short_script_max = 9999
     # 取四者最小值

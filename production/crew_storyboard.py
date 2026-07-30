@@ -1,5 +1,16 @@
 """
-crew_storyboard.py — CrewAI 后端模块（v4.4 导演引擎整合版）
+crew_storyboard.py — CrewAI 后端模块（v4.5 台词分配修复版）
+
+v4.5 修复（2026-07-29）— 台词分配缺失问题修复：
+  问题：Director 输出的分镜全是画面描述，没有角色对白——剧本台词被吞掉。
+  根因：台词在 prompt 中是"软约束"（音频符号约定），画面描述铁律5条全是视觉维度，
+        LLM 严格遵循"必须包含"清单 + 模仿无台词参考示例，自然只输出画面不分配对话。
+  修复5处，把台词从软约束提升为硬约束：
+  1. 画面描述质量铁律新增第6条「对白/台词分配」铁律
+  2. 参考级密度示例加入台词{}/音效<>/BGM（）示范
+  3. JSON Schema「画面内容」字段说明加入"角色对白"为必须包含项
+  4. 输出铁律新增第7条「台词分配强制要求」
+  5. QA 新增 L 项「台词完整性审查」——逐镜对照剧本，补回被吞掉的台词（最高优先级）
 
 v4.4 优化（2026-07-27）— Seedance 2.0 Skill OS v6.6 对照整合 P0+P1 深度版：
   1. Director 注入导演阅读5问法 — 场景功能/转折/POV/权力/潜台词，felt_intent 从此有推理起点
@@ -59,22 +70,58 @@ import re
 import csv
 import io
 import sys
+import json
 import logging
 from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process, LLM
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # LLM 工厂（不变）
 # ═════════════════════════════════════════════════════════════════════════════
 
-def create_llm(engine_choice: str, api_base: str, api_key: str, model_name: str) -> LLM:
+def create_llm(
+    engine_choice: str,
+    api_base: str,
+    api_key: str,
+    model_name: str,
+    provider: str = "",
+    timeout: int = 600,
+    max_tokens: int = None,
+) -> LLM:
+    """
+    创建 CrewAI LLM。
+    LiteLLM 需要 provider/model 格式（如 deepseek/deepseek-v4-pro）。
+    timeout 单位为秒，传给 LiteLLM 控制单次 LLM 调用超时。
+    max_tokens 显式限制单次输出长度，防止长输出被服务商静默截断导致 JSON 解析失败。
+    """
     if "Ollama" in engine_choice:
-        llm = LLM(model=f"ollama/{model_name}", base_url="http://localhost:11434")
+        lite_model = f"ollama/{model_name}"
+    elif "/" in model_name:
+        # 调用方已经传了完整 provider/model 格式
+        lite_model = model_name
+    elif provider:
+        lite_model = f"{provider}/{model_name}"
     else:
-        llm = LLM(model=model_name, api_key=api_key, base_url=api_base)
+        lite_model = model_name
+
+    logger.debug(
+        f"[create_llm] engine={engine_choice}, provider={provider}, model={lite_model}, "
+        f"timeout={timeout}s, max_tokens={max_tokens}"
+    )
+    kwargs = {
+        "model": lite_model,
+        "api_key": api_key,
+        "base_url": api_base,
+        "timeout": timeout,
+    }
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    llm = LLM(**kwargs)
     return llm
 
 
@@ -82,11 +129,14 @@ def create_llm(engine_choice: str, api_base: str, api_key: str, model_name: str)
 # Agent 工厂 — v4.0 结构参数化版（2 Agent + Seedance 规则注入）
 # ═════════════════════════════════════════════════════════════════════════════
 
-def create_agents(llm: LLM) -> dict:
+def create_agents(director_llm: LLM, qa_llm: LLM = None) -> dict:
     """
     v4.0：创建 2 个 Agent（注入 Seedance 2.0 规则约束）
       director    — 分镜导演（读剧本 → 出结构化 JSON，含音频符号约定）
       qa_reviewer — 分镜质检（语义级抽查 + Seedance 规则合规审查）
+
+    qa_llm 默认为 None，此时 QA 与 Director 共用同一个 LLM。
+    建议为 QA 配置更快、非推理的模型，避免 R1 等推理模型在长上下文 QA 阶段超时。
     """
 
     # ═══════════════════════════════════════════════════════════════════
@@ -436,21 +486,30 @@ def create_agents(llm: LLM) -> dict:
 3. 物理质感：材质触感（粗糙/光滑/潮湿/冰冷）、重量感、步伐声音暗示（鞋底材质+地面+声效）
 4. 微表情细节："视线从眉心滑落到嘴唇，喉结滚动一次，下眼睑微颤"
 5. 氛围粒子：雾浓度、尘埃飘浮方向、植被运动幅度、水面波纹、雨滴大小
+6. ★对白/台词分配（最常被忽略、也最致命的铁律）★：
+   剧本中出现的角色对白，必须分配到对应时段镜头的「画面内容」里！
+   · 严禁只写画面、吞掉台词——角色说话的镜头，画面内容中必须出现 {台词内容}
+   · 台词格式：说话者+语气+{台词内容}，例：钱阿龙低声说{你终于来了。}
+   · 一镜到底对话场景：5-8秒、1-2句短台词、注明"嘴型同步"
+   · 长对话拆为多镜时，按时间把台词分配到各镜，不要把整段对话只塞进一镜、更不能全部丢弃
+   · 仅当该时段剧本确实没有对白（纯动作/环境镜头）时，才允许不写台词
+   · 台词必须忠实于剧本原文，不可自行编造或改写台词内容
 
 ❌ 绝对禁止：
   · "他感到悲伤/她意识到危险" → 转译为：低头、垂肩、咬唇、瞳孔收缩、后退半步
   · 背后/过肩镜头描写正面五官（透视屏蔽）
   · 干瘪的一句话 → 每个镜头画面内容必须 ≥80 字
   · 任何上述反渣词库中的词汇
+  · ★只写画面不分配台词——剧本有对白但镜头画面内容里没有 {台词}★
 
-✅ 参考级密度（你要达到的标准）：
+✅ 参考级密度（你要达到的标准 — 注意台词{}/音效<>/BGM（）如何嵌入）：
   「瘴气流动的黑水林深处，月光艰难穿透雾气在地面投下斑驳的苍白光斑。
    钱阿龙身穿正红新郎服，步履僵硬地从画面深处走来，每一步脚跟先砸在地上，
    重心前倾，膝盖不打弯，像被无形丝线牵引的木偶。他走到一棵枝叶盘虬的
-   古榕树前停住，肩膀有节奏地轻微耸动，喉间发出一阵混合着笑声和哭泣的
-   诡异呜咽。推轨镜头缓慢向前，灌木枝条轻轻擦过镜头边缘，形成一层虚化的
-   绿色前景。」""",
-        llm=llm,
+   古榕树前停住，低声说{我不该来的。}，<远处传来犬吠声>，（低沉弦乐渐起）。
+   肩膀有节奏地轻微耸动，喉间发出一阵混合着笑声和哭泣的诡异呜咽。
+   推轨镜头缓慢向前，灌木枝条轻轻擦过镜头边缘，形成一层虚化的绿色前景。」""",
+        llm=director_llm,
         verbose=False,
         allow_delegation=False
     )
@@ -540,7 +599,7 @@ G. felt_intent 质量审查：
   核心要素全错 → 完全重写 | D级→完全重写
 
 修正后直接输出完整 JSON，不要解释改了什么。纯 JSON，无 Markdown。""",
-        llm=llm,
+        llm=qa_llm or director_llm,
         verbose=False,
         allow_delegation=False
     )
@@ -602,7 +661,7 @@ def create_tasks(agents: dict) -> dict:
       "机位": "平视低角度，贴近地面",
       "构图": "人物居中，前景灌木形成引导线，天空占1/3",
       "运镜": "慢速向前推轨",
-      "画面内容": "该镜头的完整画面描述（≥80字）。必须包含：角色动作轨迹（入画→过程→落点）、光影效果（光源类型+方向+色温+阴影位置）、物理质感（材质+声音暗示）、氛围细节（雾/尘埃/植被运动）。角色名直接写原名如'钱阿龙'，无需加@符号。",
+      "画面内容": "该镜头的完整画面描述（≥80字）。必须包含：角色动作轨迹（入画→过程→落点）、光影效果（光源类型+方向+色温+阴影位置）、物理质感（材质+声音暗示）、氛围细节（雾/尘埃/植被运动）、★角色对白（剧本中该时段的台词必须用{花括号}写入画面内容，注明说话者+语气；无对白的纯动作镜头才可省略）★。角色名直接写原名如'钱阿龙'，无需加@符号。",
       "出场角色": ["钱阿龙"]
     }
   ]
@@ -623,8 +682,11 @@ def create_tasks(agents: dict) -> dict:
   · 构图：人物在画面中的位置关系、前景/背景层次、引导线、三分法/黄金分割、负空间比例。
   · 运镜：运动方式+速度+情感功能。如"慢速推轨，逐渐逼近关键信息""手持微晃，纪实紧张感""Steadicam浮游，沉浸式跟随"。禁止「固定镜头」+「推拉摇移环绕」同时出现。
   · 画面内容：★ 核心创意输出 ★ 角色名直接写原名（如"钱阿龙"），代码会自动加@前缀。禁止只写"他走进来"这种干瘪描述！
-    画面内容中请按 Seedance 约定嵌入音频符号：台词用{}、音效用<>、BGM用（）。
-    例：压低声音说{别出声。}，<远处传来犬吠声>，（低沉钢琴渐起）
+    ★★台词分配铁律★★：剧本中的角色对白必须分配到对应时段镜头的「画面内容」里，用{花括号}包裹台词并注明说话者+语气。
+    严禁只写画面动作而吞掉剧本对白——每个有台词的镜头，画面内容中都必须出现 {台词内容}。
+    长对话段落拆为多镜时，按时间把台词分配到各镜，不要把整段对话只塞进一镜或全部丢弃。
+    画面内容中同时按 Seedance 约定嵌入音频符号：台词用{}、音效用<>、BGM用（）。
+    例：钱阿龙压低声音说{别出声。}，<远处传来犬吠声>，（低沉钢琴渐起）
     禁止使用反渣词库中的任何词汇（电影感/大片感/高质量/温馨/压抑/恐怖等）。
   · 出场角色：该镜头中出现的角色名列表，按出场顺序。
 
@@ -650,7 +712,8 @@ def create_tasks(agents: dict) -> dict:
 3. 画面内容每个 ≥80 字，核心镜头 ≥120 字
 4. 每个镜头的 felt_intent 必须独特、具体、非重复（相邻两镜意图不得完全相同）
 5. 不得使用反渣词库中的任何词汇（cinematic/epic/电影感/大片感/高质量/温馨/压抑/恐怖/暧昧/浪漫/悲伤等）
-6. JSON 必须可被 Python json.loads() 直接解析""",
+6. JSON 必须可被 Python json.loads() 直接解析
+7. ★★★台词分配强制要求★★★：剧本中所有角色对白必须分配到对应时段镜头的「画面内容」中（用{花括号}包裹，注明说话者+语气）。严禁只输出画面描述而吞掉剧本台词——这是最严重的错误。逐镜检查：该时段剧本有对白吗？有→画面内容里必须有{台词}；无→才可只写画面。""",
         expected_output="""一个严格的 JSON 对象，包含「全局氛围画质」「director_voice」「场景定义」「分镜列表」四个字段。
 分镜列表中每个元素含10个字段（镜头号/场景名/felt_intent/时长秒/景别/机位/构图/运镜/画面内容/出场角色）。
 director_voice 标注项目级导演声音选择，felt_intent 驱动该镜所有创意选择，画面内容描述达到专业影视级密度。
@@ -719,6 +782,19 @@ K. 系统化反渣检查（最重要！逐镜扫描）：
    · 否定渣词：no blur / no artifacts / 不模糊 / 不抖动 / 无噪点 / 不要出现xxx → 删除否定语句，改为正向锁定
    · 标签沙拉：逗号关键词堆砌（"girl, sunset, 8K, cinematic"）→ 改写为散文式拍摄简报
    发现任何上述词汇，必须修正！不能保留！
+
+L. ★台词完整性审查（最重要！防止"只有画面没有对话"的致命错误）★：
+   你能看到原始剧本和Director的JSON输出。逐镜对照检查：
+   1. 该镜头所覆盖的剧本时段中，是否有角色对白？
+      → 有对白：镜头「画面内容」中是否包含了对应的 {台词内容}？
+        · 如果没有 → ★必须补回★：在该镜头画面内容中加入 说话者+语气说{台词内容}
+        · 台词必须忠实剧本原文，不可改写
+      → 无对白（纯动作/环境镜头）：允许画面内容中不出现台词
+   2. 是否有镜头只写了画面动作，却吞掉了剧本中该时段的对白？→ 必须补回台词
+   3. 长对话段落被拆为多镜时，台词是否只出现在其中一镜、其余镜丢失？→ 按时间把台词分配到对应各镜
+   4. 台词是否注明了说话者+语气？→ 补充为"说话者+语气说{台词}"
+   5. 台词符号是否正确使用了{花括号}？→ 修正（不是()不是<>）
+   这是最高优先级审查项——剧本有台词却不出现在分镜中，是分镜系统最严重的功能性缺陷。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【输出格式】
@@ -897,13 +973,25 @@ def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) 
     """
     shot_list = []
     accumulated = time_offset_seconds
-    global_atmosphere = shot_data.get("全局氛围画质", "")
+    global_atmosphere = shot_data.get("全局氛围画质", "") if isinstance(shot_data, dict) else ""
     # v4.4: 提取导演声音，追加到全局氛围输出中
-    director_voice = shot_data.get("director_voice", "")
+    director_voice = shot_data.get("director_voice", "") if isinstance(shot_data, dict) else ""
     if director_voice:
         global_atmosphere = f"[导演声音] {director_voice}\n{global_atmosphere}" if global_atmosphere else f"[导演声音] {director_voice}"
-    scene_defs = shot_data.get("场景定义", {})
-    shots = shot_data.get("分镜列表", [])
+    scene_defs = shot_data.get("场景定义", {}) if isinstance(shot_data, dict) else {}
+    shots = shot_data.get("分镜列表", []) if isinstance(shot_data, dict) else []
+
+    # 防御：确保 shots 是列表（LLM 可能返回字符串）
+    if isinstance(shots, str):
+        logger.warning(f"assemble_seedance_prompt: 分镜列表是字符串而非列表，尝试JSON解析")
+        try:
+            shots = json.loads(shots)
+        except (json.JSONDecodeError, TypeError):
+            logger.error(f"assemble_seedance_prompt: 分镜列表字符串无法解析为JSON: {shots[:200]}")
+            shots = []
+    if not isinstance(shots, list):
+        logger.warning(f"assemble_seedance_prompt: 分镜列表类型异常({type(shots).__name__})，返回空列表")
+        shots = []
 
     if not shots:
         return [], time_offset_seconds, global_atmosphere
@@ -923,6 +1011,10 @@ def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) 
             global_atmo_summary = atmo
 
     for shot in shots:
+        # 防御：确保每个 shot 是字典（LLM 可能返回字符串元素）
+        if not isinstance(shot, dict):
+            logger.warning(f"assemble_seedance_prompt: 跳过非字典镜头: type={type(shot).__name__}, value={str(shot)[:100]}")
+            continue
         # ── 基本字段提取 ──
         shot_num = shot.get("镜头号", len(shot_list) + 1)
         scene_name = str(shot.get("场景名", "")).strip()
@@ -1201,11 +1293,32 @@ def run_crew_on_chunk(
     api_base: str,
     api_key: str,
     model_name: str,
-    time_offset_seconds: float = 0.0
+    time_offset_seconds: float = 0.0,
+    provider: str = "",
+    timeout: int = 600,
+    qa_api_base: str = "",
+    qa_api_key: str = "",
+    qa_model_name: str = "",
+    qa_provider: str = "",
+    qa_timeout: int = 600,
+    max_tokens: int = 8000,
+    fallback_api_base: str = "",
+    fallback_api_key: str = "",
+    fallback_model_name: str = "",
+    fallback_provider: str = "",
+    fallback_timeout: int = 600,
 ) -> tuple:
     """
     v3.0: 对单个剧本切块运行 2-Agent 工作流（Director → QA），
     然后由代码层组装 Seedance 提示词。
+
+    新增参数：
+      - timeout: Director Agent 的 LLM 超时（秒）
+      - qa_api_base / qa_api_key / qa_model_name / qa_provider / qa_timeout:
+        QA Agent 独立模型配置。若未提供，QA 回退到与 Director 相同配置。
+      - max_tokens: 单次 LLM 输出上限，防止长输出被服务商静默截断。
+      - fallback_* : Director 跨服务商降级配置。某服务商不可用时切到备用服务商重试，
+        而不是用同一个（可能超时的）模型死循环。
 
     返回 (list of dict, total_seconds_float, global_atmosphere_str)：
       - list: 每个 dict 含 4 列（镜头号/时间码/景别机位运镜/终极Seedance提示词）
@@ -1252,50 +1365,125 @@ def run_crew_on_chunk(
     except Exception:
         pass
     
-    # ── 运行 CrewAI 2-Agent 工作流 ──
-    llm = create_llm(engine_choice, api_base, api_key, model_name)
-    agents = create_agents(llm)
-    tasks = create_tasks(agents)
-    crew = create_crew(agents, tasks)
-    
-    result = crew.kickoff(inputs={
-        'script': script_input,
-        'style': effective_style,
-        'char_injection': char_injection,
-        'duration_guide': duration_guide
-    })
-    
-    # ── 提取 QA 输出 ──
+    # ── 构建主用 LLM（Director + QA 各自独立，均显式限制 max_tokens 防截断）──
+    director_llm = create_llm(
+        engine_choice, api_base, api_key, model_name,
+        provider=provider, timeout=timeout, max_tokens=max_tokens
+    )
+    if qa_model_name and qa_provider:
+        effective_qa_api_base = qa_api_base or api_base
+        effective_qa_api_key = qa_api_key or api_key
+        qa_llm = create_llm(
+            engine_choice,
+            effective_qa_api_base,
+            effective_qa_api_key,
+            qa_model_name,
+            provider=qa_provider,
+            timeout=qa_timeout,
+            max_tokens=max_tokens,
+        )
+        logger.info(
+            f"[run_crew_on_chunk] Director={provider}/{model_name} timeout={timeout}s | "
+            f"QA={qa_provider}/{qa_model_name} timeout={qa_timeout}s"
+        )
+    else:
+        qa_llm = director_llm
+        logger.info(
+            f"[run_crew_on_chunk] Director/QA 共用 {provider}/{model_name} timeout={timeout}s"
+        )
+
+    # ── 构建跨服务商降级 LLM（deepseek 不可用时切 kimi/glm，避免用同一模型死循环）──
+    fallback_llm = None
+    if fallback_model_name and fallback_provider:
+        fallback_llm = create_llm(
+            engine_choice,
+            fallback_api_base or api_base,
+            fallback_api_key or api_key,
+            fallback_model_name,
+            provider=fallback_provider,
+            timeout=fallback_timeout,
+            max_tokens=max_tokens,
+        )
+        logger.info(
+            f"[run_crew_on_chunk] 已配置跨服务商降级: {fallback_provider}/{fallback_model_name} "
+            f"timeout={fallback_timeout}s"
+        )
+
+    # ── 多层级重试：每次失败都换一组真正不同的 LLM，而非用同一个超时的模型 ──
+    # 层级1：完整 Crew（Director + QA），主用模型
+    # 层级2：仅 Director（跳过 QA），主用模型
+    # 层级3：仅 Director（跳过 QA），跨服务商降级模型
+    attempts = [
+        (director_llm, qa_llm, False, "primary-full-crew"),
+    ]
+    if fallback_llm is not None:
+        # fallback 只跑 Director，省一次长上下文调用
+        attempts.append((fallback_llm, fallback_llm, True, f"fallback-{fallback_provider}-director-only"))
+    attempts.append((director_llm, director_llm, True, "primary-director-only"))
+
+    result = None
+    used_fallback = False
+    last_err = None
+    for d_llm, q_llm, director_only, label in attempts:
+        try:
+            agents = create_agents(d_llm, q_llm)
+            tasks = create_tasks(agents)
+            crew = create_crew_director_only(agents, tasks) if director_only else create_crew(agents, tasks)
+            result = crew.kickoff(inputs={
+                'script': script_input,
+                'style': effective_style,
+                'char_injection': char_injection,
+                'duration_guide': duration_guide
+            })
+            used_fallback = (label != "primary-full-crew")
+            logger.info(f"[run_crew_on_chunk] 尝试成功 [{label}]")
+            break
+        except Exception as e:
+            last_err = e
+            logger.warning(f"[run_crew_on_chunk] 尝试失败 [{label}]: {type(e).__name__}: {e}")
+            continue
+
+    if result is None:
+        logger.error(f"[run_crew_on_chunk] 所有重试均失败，最后错误: {last_err}", exc_info=True)
+        return [], 0.0, ""
+
+    # ── 提取输出 ──
     qa_raw = ""
-    if hasattr(result, 'tasks_output') and len(result.tasks_output) >= 2:
-        qa_raw = result.tasks_output[-1].raw
+    director_raw = ""
+    if hasattr(result, 'tasks_output') and result.tasks_output:
+        # 完整 Crew：最后一个 task 是 QA
+        director_raw = result.tasks_output[0].raw if len(result.tasks_output) >= 1 else ""
+        qa_raw = result.tasks_output[-1].raw if len(result.tasks_output) >= 2 else director_raw
     elif hasattr(result, 'raw'):
         qa_raw = result.raw
     else:
         qa_raw = str(result)
-    
-    if not qa_raw:
+
+    if not qa_raw and not director_raw:
         return [], 0.0, ""
-    
+
     # ── 解析结构化 JSON ──
     shot_data = parse_structured_json(qa_raw)
-    if not shot_data:
+    if not shot_data and director_raw:
         # 回退：尝试从 Director 输出解析（如果 QA 输出不可解析）
-        if hasattr(result, 'tasks_output') and len(result.tasks_output) >= 1:
-            director_raw = result.tasks_output[0].raw
-            shot_data = parse_structured_json(director_raw)
-    
+        shot_data = parse_structured_json(director_raw)
+
     if not shot_data:
         return [], 0.0, ""
-    
+
     # ── 代码组装：结构化 JSON → 4列分镜数据 ──
     shot_list, total_seconds, global_atmosphere = assemble_seedance_prompt(
         shot_data, time_offset_seconds
     )
-    
+
     # ── 代码后验证 ──
     _validate_min_content(shot_list)
-    
+
+    if used_fallback:
+        logger.warning(
+            f"[run_crew_on_chunk] 已使用降级结果（跳过完整 Crew）：{len(shot_list)}个镜头"
+        )
+
     return shot_list, total_seconds, global_atmosphere
 
 
@@ -1312,6 +1500,13 @@ def run_production_pipeline(
     model_name: str = "deepseek-v4-pro",
     output_file: str = '分镜矩阵_Seedance2.0.csv',
     parallel: bool = False,
+    provider: str = "deepseek",
+    timeout: int = 600,
+    qa_api_base: str = "",
+    qa_api_key: str = "",
+    qa_model_name: str = "",
+    qa_provider: str = "",
+    qa_timeout: int = 600,
 ):
     """
     v3.0：完整流程入口（2-Agent + 代码组装）。
@@ -1339,8 +1534,26 @@ def run_production_pipeline(
         except Exception:
             pass
         
-        llm = create_llm(engine_choice, api_base, resolved_api_key, model_name)
-        agents = create_agents(llm)
+        director_llm = create_llm(
+            engine_choice, api_base, resolved_api_key, model_name, provider=provider, timeout=timeout
+        )
+
+        # QA 模型：未单独配置时回退到 Director 配置
+        if qa_model_name and qa_provider:
+            effective_qa_api_base = qa_api_base or api_base
+            effective_qa_api_key = qa_api_key or resolved_api_key
+            qa_llm = create_llm(
+                engine_choice,
+                effective_qa_api_base,
+                effective_qa_api_key,
+                qa_model_name,
+                provider=qa_provider,
+                timeout=qa_timeout,
+            )
+        else:
+            qa_llm = director_llm
+
+        agents = create_agents(director_llm, qa_llm)
         tasks_obj = create_tasks(agents)
         
         # ── 日志捕获 ──
