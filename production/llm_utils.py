@@ -45,9 +45,19 @@ def ensure_ollama_model(model_name):
 # OpenAI Client 创建（制片流专用，复用 shared 层的httpx长超时方案）
 # =============================================================================
 
+# 复用同一个 httpx.Client，避免 Streamlit 频繁 rerun 下 TCP 连接泄漏（FD 耗尽）
+_httpx_client_singleton = None
+
+def _get_shared_http_client():
+    global _httpx_client_singleton
+    if _httpx_client_singleton is None:
+        _httpx_client_singleton = httpx.Client(timeout=600.0, trust_env=False)
+    return _httpx_client_singleton
+
+
 def get_llm_client(provider, api_base, api_key):
     """创建 OpenAI Client（制片流接口，兼容B的参数名）"""
-    custom_http_client = httpx.Client(timeout=600.0, trust_env=False)
+    custom_http_client = _get_shared_http_client()
     if "Ollama" in provider:
         return OpenAI(base_url='http://localhost:11434/v1', api_key='ollama', http_client=custom_http_client)
     else:
@@ -127,10 +137,16 @@ def call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.0,
         # 注意：这个修复有风险，但值得尝试
         text = re.sub(r"(?<=[{:,\[])\s*'([^']*?)'\s*:", r'"\1":', text)
         text = re.sub(r":\s*'([^']*?)'\s*(?=[,}\]])", r':"\1"', text)
-        # 修复3：修复未转义的换行符
-        text = text.replace('\n', '\\n')
-        # 修复4：修复未转义的制表符
-        text = text.replace('\t', '\\t')
+        # 修复3/4：仅对 JSON 字符串值内部的「真实」换行/回车/制表符做转义
+        # （原先的无差别全局 replace 会把结构性空白与已正确转义的字符串也转义，
+        #   反而把合法 JSON 弄坏；这里用正则只命中 "..." 字符串值内部的内容）
+        try:
+            def _escape_str(m):
+                s = m.group(0)
+                return s.replace('\r', '\\r').replace('\n', '\\n').replace('\t', '\\t')
+            text = re.sub(r'"((?:[^"\\]|\\.)*)"', _escape_str, text)
+        except Exception:
+            pass
         return text
 
     last_error = ""
@@ -223,6 +239,22 @@ def read_docx(file):
     return '\n'.join(text)
 
 
+def _read_text_utf8_fallback(uploaded_file):
+    """读取上传文本文件，utf-8 失败回退到常见中文编码，避免 UnicodeDecodeError 崩溃。"""
+    try:
+        raw = uploaded_file.read()
+    except Exception:
+        st.error("❌ 文件读取失败")
+        return ""
+    for enc in ("utf-8", "gbk", "gb18030", "shift_jis", "latin-1"):
+        try:
+            return str(raw, encoding=enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    st.error("❌ 无法解码文件（已尝试 utf-8/gbk/shift_jis 等编码）")
+    return ""
+
+
 def read_uploaded_file(uploaded_file):
     """读取上传的文件（支持 .docx / .txt / .md）"""
     if uploaded_file is None:
@@ -232,11 +264,7 @@ def read_uploaded_file(uploaded_file):
     if file_name.endswith('.docx'):
         return read_docx(uploaded_file)
     elif file_name.endswith(('.txt', '.md')):
-        return str(uploaded_file.read(), encoding='utf-8')
+        return _read_text_utf8_fallback(uploaded_file)
     else:
         # 尝试作为文本读取
-        try:
-            return str(uploaded_file.read(), encoding='utf-8')
-        except Exception:
-            st.error(f"❌ 不支持的文件格式: {file_name}")
-            return ""
+        return _read_text_utf8_fallback(uploaded_file)

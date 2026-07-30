@@ -428,11 +428,19 @@ def get_format_strategy(format_name: str) -> Dict[str, Dict[str, str]]:
 # OpenAI Client 创建（httpx 长超时方案）
 # =============================================================================
 
+_httpx_client_singleton = None
+
+def _get_shared_http_client():
+    global _httpx_client_singleton
+    if _httpx_client_singleton is None:
+        _httpx_client_singleton = httpx.Client(timeout=600.0, trust_env=False)
+    return _httpx_client_singleton
+
+
 def create_openai_client(base_url: str, api_key: str) -> Optional[OpenAI]:
-    """创建 OpenAI Client 实例（统一使用httpx长超时）"""
+    """创建 OpenAI Client 实例（统一使用httpx长超时，复用 httpx.Client 避免连接泄漏）"""
     try:
-        custom_http_client = httpx.Client(timeout=600.0, trust_env=False)
-        return OpenAI(base_url=base_url, api_key=api_key, http_client=custom_http_client)
+        return OpenAI(base_url=base_url, api_key=api_key, http_client=_get_shared_http_client())
     except Exception as e:
         st.error(f"创建 OpenAI Client 失败: {str(e)}")
         return None
@@ -542,7 +550,7 @@ def detect_script_format_by_volume(text: str) -> dict:
     # 去重并获取最大集数
     if episode_matches:
         episode_nums = sorted(set(int(m) for m in episode_matches))
-        episode_count = episode_nums[-1]  # 最大集数
+        episode_count = len(episode_nums)  # 实际集数（去重后），非最大集号
     else:
         episode_count = 0
 

@@ -378,9 +378,7 @@ class ContextRetriever:
             # 优先从 StructuredMemoryStore 获取
             if self._memory_store:
                 try:
-                    idx = self._memory_store._episode_index.get(ep)
-                    if idx and idx.summary:
-                        summary = idx.summary
+                    summary = self._memory_store._episode_index.get_summary(ep)
                 except Exception:
                     pass
 
