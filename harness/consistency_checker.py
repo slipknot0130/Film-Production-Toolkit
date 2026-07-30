@@ -254,12 +254,14 @@ class ConsistencyChecker:
                                     item_keywords = ["钥匙", "信", "戒指", "手机", "照片", "刀"]
                                     for kw in item_keywords:
                                         if kw in fact and kw in new_content:
-                                            if check_char in new_content[new_content.find(kw)-50:new_content.find(kw)+50]:
+                                            _pos = new_content.find(kw)
+                                            _start = max(0, _pos - 50)  # 防止关键词在文本前50字内产生负索引错配
+                                            if check_char in new_content[_start:_pos + 50]:
                                                 issues.append(ConsistencyIssue(
                                                     issue_type="property_ownership",
                                                     severity=ConsistencyIssue.SEVERITY_MAJOR,
-                                                    description=f"关键道具「{kw}」原属于{char}（第{source_scene.episode}集），"
-                                                                f"但第{len(self.scene_timeline._scenes)}场后出现在{check_char}处",
+                                                    description=f"关键道具「{kw}」原属于{char}（第{source_scene.episode}集第{source_scene.scene_number}场），"
+                                                                f"但后续内容中出现在{check_char}处",
                                                     suggestion="如道具发生了转让，需在剧本中交代转让过程。",
                                                 ))
 

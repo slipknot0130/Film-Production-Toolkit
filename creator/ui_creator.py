@@ -1760,8 +1760,15 @@ def _render_cross_mode_bridge(script_text, analysis_feedback):
         if st.session_state.get("cross_mode_modified_script"):
             st.rerun()
         else:
-            time.sleep(2)
-            st.rerun()
+            _poll_key = "ui_creator_crossmode_poll_count"
+            _poll_count = st.session_state.get(_poll_key, 0) + 1
+            if _poll_count > 900:  # 900 × 2s ≈ 30 分钟超时
+                st.session_state[_poll_key] = 0
+                st.error("⚠️ 跨模式修改等待超时（约30分钟未完成），已停止轮询。")
+            else:
+                st.session_state[_poll_key] = _poll_count
+                time.sleep(2)
+                st.rerun()
 
     # =========================================================================
     # state0：初始状态 → 可编辑剧本 + 分析反馈 + 一键AI修改
@@ -1998,8 +2005,10 @@ def _render_modification_report(report: dict, original_script: str, analysis_fee
         df = pd.DataFrame(suggestions)
         # 保证列顺序
         col_order = ["priority", "category", "episode", "issue", "suggestion", "expected_effect"]
-        df = df[[c for c in col_order if c in df.columns]]
-        df.columns = ["优先级", "类别", "涉及集数", "问题", "建议", "预期效果"]
+        present_cols = [c for c in col_order if c in df.columns]
+        df = df[present_cols]
+        labels = ["优先级", "类别", "涉及集数", "问题", "建议", "预期效果"]
+        df.columns = [labels[i] for i in range(len(present_cols))]
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     # 预计影响
@@ -2694,8 +2703,16 @@ def render_creator():
                 st.info("📭 日志区域\n\n点击「启动多智能体编剧工坊」开始生成大纲")
 
             if _ss("workflow_running"):
-                time.sleep(2)
-                st.rerun()
+                _poll_key = "ui_creator_workflow_poll_count"
+                _poll_count = st.session_state.get(_poll_key, 0) + 1
+                if _poll_count > 900:  # 900 × 2s ≈ 30 分钟超时
+                    _set_ss("workflow_running", False)
+                    st.session_state[_poll_key] = 0
+                    st.error("⚠️ 工作流执行超时（约30分钟未完成），已自动停止轮询。请查看上方日志排查。")
+                else:
+                    st.session_state[_poll_key] = _poll_count
+                    time.sleep(2)
+                    st.rerun()
 
         # =====================================================================
         # Tab B：剧本改编

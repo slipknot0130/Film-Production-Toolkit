@@ -1279,7 +1279,7 @@ def run_episode_doctor_agent(
 
 ## 待审查剧本：第 {episode_num} 集
 
-{episode_content}
+{episode_content[:8000] if len(episode_content) > 8000 else episode_content}
 
 ---
 
@@ -2219,7 +2219,7 @@ def _inject_tool_schema_if_available(base_prompt: str, agent: str) -> str:
         tool_text = registry.format_for(agent)
         if tool_text:
             return base_prompt + "\n\n" + tool_text
-    except ImportError:
+    except Exception:
         pass
     return base_prompt
 

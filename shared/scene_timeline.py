@@ -263,11 +263,20 @@ class SceneTimeline:
         """
         results: List[SceneRecord] = []
 
-        # 先收集当前集之前的场景
+        # 当前集内、before_scene 之前的场景也纳入候选
+        # （修复原死代码：循环从 episode-1 开始，ep 永远 != episode，原过滤永不生效）
+        if before_scene is not None:
+            cur_scenes = [s for s in self.get_scenes_by_episode(episode)
+                          if s.scene_number < before_scene]
+            for s in reversed(cur_scenes):
+                results.append(s)
+                if len(results) >= n:
+                    results.reverse()
+                    return results
+
+        # 再收集之前各集的场景（从上一集往前回溯）
         for ep in range(episode - 1, 0, -1):
             ep_scenes = self.get_scenes_by_episode(ep)
-            if before_scene is not None and ep == episode:
-                ep_scenes = [s for s in ep_scenes if s.scene_number < before_scene]
             for s in reversed(ep_scenes):
                 results.append(s)
                 if len(results) >= n:
