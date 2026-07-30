@@ -701,16 +701,17 @@ def create_tasks(agents: dict) -> dict:
   · 出场角色：该镜头中出现的角色名列表，按出场顺序。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【按上方「剧本体量分析」作为参考，自主判断】
+【按上方「剧本体量分析」硬性执行 — 严禁少拆】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  上方代码计算的范围仅供参考，你需要结合剧本的实际节奏和戏剧密度自主判断合理分镜数。
-  
-  分镜数量判断原则：
-  · 宁可少出几个高质量镜头，也不要出一堆薄弱的凑数镜头
+  上方代码给出的「硬性镜数要求：本块必须产出 X ～ Y 镜（下限 X 镜）」是【硬性下限命令】，不是软参考！
+  ★ 本段必须产出 ≥ 下限 X 镜，并请瞄准上限 Y 镜；若实际镜头数 < 下限 X，即为拆分严重不足，必须补足至下限以上 ★
+
+  分镜数量判断原则（强制）：
+  · 按节奏充分拆分：宁可多拆，也绝不要把多个动作/多句对话并进同一镜
   · 每次切镜必须有独立的视觉价值（新的景别/机位/运镜/情绪节奏变化）
-  · 短剧本/动作密集段落 → 少镜+长镜（每镜画面内容要丰富可见）
-  · 长对话段落 → 可适当多镜但要避免拆分连贯对话节奏
-  · 对话段落参考：3-5镜/段（一镜到底对话5-8s） | 武戏段落：5-8镜/段（2-3s/镜） | 过渡段落：2-3镜/段（2-3s/镜）
+  · 目标密度约 1 镜 / 24 字（对应 12000 字剧本≈45 分钟成片）；若上方给出了硬性镜数下限，则以下限为准充分拆分
+  · 长对话段落 → 按对白轮次/情绪转折拆为多镜，每镜落到具体台词
+  · 对话段落参考：5-8镜/段（一镜到底对话5-8s） | 武戏段落：8-12镜/段（2-3s/镜） | 过渡段落：3-5镜/段（2-3s/镜）
   
   每镜严格遵守：4-5s内=一个主动作/一次切镜，复杂剧情=12-15s或拆多镜
 
@@ -736,6 +737,9 @@ director_voice 标注项目级导演声音选择，felt_intent 驱动该镜所�
         description="""你是分镜质检。审查Director的结构化JSON输出，修正后输出。
 
 你可以看到Director的完整JSON输出。
+
+同时，代码生成的「剧本体量分析 — 硬性镜数要求」如下（请据此核对镜头数是否达标）：
+{duration_guide}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【审查项目】
@@ -806,6 +810,13 @@ L. ★台词完整性审查（最重要！防止"只有画面没有对话"的致
    4. 台词是否注明了说话者+语气？→ 补充为"说话者+语气说：“台词”"
    5. 台词格式是否正确使用了 ：“” （冒号+中文双引号）？→ 若发现{花括号}/()/<>包裹的台词，一律改写为 ：“台词” 格式（即梦2.0只识别此格式）
    这是最高优先级审查项——剧本有台词却不出现在分镜中，是分镜系统最严重的功能性缺陷。
+
+M. ★镜头数下限审查（防止"拆分不足"）★：
+   对照上方「剧本体量分析」的硬性镜数要求——本块要求产出 X ～ Y 镜（下限 X 镜）。
+   1. 实际输出镜头数是否 ≥ 下限 X？→ 若 < X，说明拆分严重不足，必须继续拆分动作节拍/对白轮次/转场/情绪转折，补足至下限以上。
+   2. 严禁以"已覆盖全部剧情"为由少于下限 X 镜——密度不足本身是错误，必须靠增加镜头数解决。
+   3. 若实际镜头数 > 上限 Y 且单镜质量明显下降，可合并相邻同质镜头，但下限 X 仍为硬约束。
+
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【输出格式】
@@ -1255,8 +1266,11 @@ def parse_structured_json(raw_text: str) -> dict:
 
 def _parse_timecode_end(tc: str) -> float:
     """解析时间码字符串的结束秒数（用于跨切块时间码累积）。"""
+    import logging
+    logger = logging.getLogger(__name__)
     parts = tc.split('~')
     if len(parts) < 2:
+        logger.warning(f"[timecode] 时间码缺少'~'分隔，无法解析：{tc!r}，按 0.0 计（跨切块时间码可能漂移）")
         return 0.0
     end_part = parts[-1].strip()
     end_clean = re.sub(r'[+＋]\s*\d+.*$', '', end_part).strip()
@@ -1269,6 +1283,7 @@ def _parse_timecode_end(tc: str) -> float:
     if match:
         return int(match.group(1)) * 60 + int(match.group(2))
     
+    logger.warning(f"[timecode] 时间码结束段无法解析：{tc!r}，按 0.0 计（跨切块时间码可能漂移）")
     return 0.0
 
 
@@ -1319,6 +1334,7 @@ def run_crew_on_chunk(
     fallback_model_name: str = "",
     fallback_provider: str = "",
     fallback_timeout: int = 600,
+    target_duration_sec: float = 0.0,
 ) -> tuple:
     """
     v3.0: 对单个剧本切块运行 2-Agent 工作流（Director → QA），
@@ -1373,7 +1389,8 @@ def run_crew_on_chunk(
     duration_guide = ""
     try:
         from shared.script_preprocessor import generate_duration_guide
-        duration_guide = generate_duration_guide(script_input)
+        # 基于 chunk 文本本身计算密度（不含角色前缀/时间提示，避免污染字符统计）
+        duration_guide = generate_duration_guide(chunk, target_duration_sec=target_duration_sec)
     except Exception:
         pass
     
@@ -1519,6 +1536,7 @@ def run_production_pipeline(
     qa_model_name: str = "",
     qa_provider: str = "",
     qa_timeout: int = 600,
+    target_duration_sec: float = 0.0,
 ):
     """
     v3.0：完整流程入口（2-Agent + 代码组装）。
@@ -1542,7 +1560,7 @@ def run_production_pipeline(
         duration_guide = ""
         try:
             from shared.script_preprocessor import generate_duration_guide
-            duration_guide = generate_duration_guide(script_content)
+            duration_guide = generate_duration_guide(script_content, target_duration_sec=target_duration_sec)
         except Exception:
             pass
         

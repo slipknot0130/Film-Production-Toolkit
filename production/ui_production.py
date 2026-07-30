@@ -1105,8 +1105,25 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
         st.markdown("---")
 
         # 第二步：CrewAI 2-Agent 工作流（v3.0）
-        chunks = split_script_smart(script_content)
+        chunks = split_script_smart(script_content, max_chars=550)
         st.success(f"第二步：启动 Seedance 2.0 结构参数化工作流，对 {len(chunks)} 个剧本切块进行分镜...")
+
+        # 目标时长：从侧边栏读取（分钟）。>0 时按各块字符占比分摊到每块，反推镜数密度
+        _target_duration_min = float(st.session_state.get("target_duration_min", 0.0) or 0.0)
+        _total_script_chars = max(sum(len(c) for c in chunks), 1)
+
+        # 前置可行性检查：剧本偏短 / 目标偏大时，单块 SAFE_CAP 护栏无法达成目标，提前警告
+        if _target_duration_min > 0:
+            _avg = 5.0
+            _theoretical_shots = _target_duration_min * 60.0 / _avg
+            _max_safe_sec = len(chunks) * 28 * _avg
+            if _theoretical_shots > len(chunks) * 28:
+                st.warning(
+                    f"⚠️ 目标 {_target_duration_min:.0f} 分钟约需 {int(_theoretical_shots)} 镜，"
+                    f"但当前剧本（{len(script_content)} 字）在单块安全上限下最多约 "
+                    f"{int(_max_safe_sec/60)} 分钟。建议：加长剧本，或调低目标时长；"
+                    f"否则将按上限封顶，实际时长低于目标。"
+                )
 
         chars_str = json.dumps(global_chars, ensure_ascii=False) if global_chars else ""
         global_shots = []
@@ -1118,6 +1135,10 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
             for i, chunk in enumerate(chunks):
                 status_placeholder = st.empty()
                 status_placeholder.info(f"  正在处理第 {i+1}/{len(chunks)} 个切块（时间码从 {int(accumulated_seconds//60):02d}:{int(accumulated_seconds%60):02d} 开始）...")
+                # 按字符占比分摊目标时长到本块（目标模式）
+                _chunk_target_sec = 0.0
+                if _target_duration_min > 0:
+                    _chunk_target_sec = (_target_duration_min * 60.0) * (len(chunk) / _total_script_chars)
                 try:
                     shots, total_secs, atmosphere = run_crew_on_chunk(
                         chunk, chars_str, style_tokens_input,
@@ -1125,7 +1146,8 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
                         st.session_state.base_url,
                         st.session_state.api_key or "sk-local",
                         model_name,
-                        time_offset_seconds=accumulated_seconds
+                        time_offset_seconds=accumulated_seconds,
+                        target_duration_sec=_chunk_target_sec
                     )
                     # 保存首个切块的全局氛围画质
                     if i == 0 and atmosphere:

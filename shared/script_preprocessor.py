@@ -86,7 +86,8 @@ EMOTION_KEYWORDS = {
 SCENE_MARKERS = re.compile(
     r'(?:【场景[：:]|场景[：:]|#\s*场景|##\s*场景|'
     r'INT\.|EXT\.|INT/EXT|INT/|EXT/|'
-    r'内景[：:]|外景[：:]|日内|夜内|日外|夜外)',
+    r'内景[：:]|外景[：:]|日内|夜内|日外|夜外|'
+    r'^\s*\d{1,3}\s+[\u4e00-\u9fa5A-Za-z])',  # 行首数字场标：如 "01  街头/车上...  日   内/外"
     re.MULTILINE | re.IGNORECASE
 )
 
@@ -447,29 +448,29 @@ def count_internal_external_scenes(script_text: str) -> tuple:
     return internal, external
 
 
-def generate_duration_guide(script_text: str) -> str:
+def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) -> str:
     """
-    v2.3：代码层分析剧本体量，生成分镜时长/镜数推荐（参考值，非硬性约束）。
+    v2.3：代码层分析剧本体量，生成分镜时长/镜数推荐。
     纯算法计算 — 字数统计、对白密度、场景数量 — 不做任何语义判断。
 
     返回格式化的推荐字符串，直接注入 Director Agent 的 prompt。
-    让 LLM 根据数据参考自主规划分镜，而非依赖硬编码的固定示例。
 
-    v2.3 修正（2026-07-21）：
-      - 新增「屏幕内容字符」计算：排除场标、角色名前缀等格式字符，只统计对白+动作描述
-      - 新增硬上限：单切块最多80镜，且不超过 屏幕内容字符/15（确保每镜有足够的视觉内容）
-      - 措辞从"严格按此范围规划"改为"作为参考，Agent自主判断合理分镜数"
+    v2.6 重大升级：支持「用户指定目标时长」驱动拆镜密度。
+      - target_duration_sec <= 0：沿用默认密度模型（约 1 镜 / 24 字，对应 12000 字≈45 分钟成片），
+        作为硬性下限要求（不再软参考）。
+      - target_duration_sec >  0：按目标时长反推镜数（镜数 = 目标秒 ÷ 平均镜秒），
+        作为硬性目标——分块模式下各块按字符占比分摊目标时长，单块目标受 SAFE_CAP 护栏兜底。
 
-    核心公式：
-      屏幕内容字符 ÷ 5.5 = 纯阅读秒数（剧本比小说稀疏，5.5字/秒更合理）
-      纯阅读秒数 × 表演膨胀系数 = 预估总时长
-      预估总时长 ÷ 平均镜秒 = 预估镜数
-      预估镜数 × 上限系数 → 硬上限裁剪
+    核心公式（v2.5 — 对齐用户成片密度模型）：
+      默认密度：约 1 镜 / TARGET_CHARS_PER_SHOT 字（对应 12000 字剧本≈45 分钟成片）
+      预估镜数 = 屏幕内容字符 ÷ TARGET_CHARS_PER_SHOT
+      预估总时长 = 预估镜数 × 平均镜秒（时长与镜数严格一致，不再各自独立估算）
 
-    表演膨胀系数取决于对白密度：
-      - 对话为主 (>60%对白行) → ×1.5（对话节奏快，不需要大幅膨胀）
-      - 均衡 (30-60%) → ×1.8
-      - 动作为主 (<30%) → ×2.0（视觉密度高但上限收紧）
+    说明：
+      - 旧版「阅读秒数×膨胀系数」会高估时长、却把镜数卡在 30，导致时长与镜数自相矛盾；
+        现改为镜数由密度直接决定，时长=镜数×镜秒，二者一致。
+      - 膨胀系数不再用于放大时长，仅用于为平均镜秒选择节奏基调（对话快/动作短）。
+      - 无论默认还是目标模式，输出的「参考总镜数」一律作为硬性下限要求，Director 必须服从。
     """
     # ── 1. 文本量统计 ──
     stripped = script_text.strip()
@@ -517,31 +518,26 @@ def generate_duration_guide(script_text: str) -> str:
     scene_name_time_matches = re.findall(r'(?:^|\n)[\u4e00-\u9fa5A-Za-z]+[ ]+(?:日|夜|晨|昏|凌晨|傍晚)[ ]*(?:内|外)(?:\n|$)', stripped, re.MULTILINE)
     scene_count = max(scene_count, len(chinese_scene_matches), len(scene_name_time_matches), 1)
 
-    # ── 5. 对白密度与膨胀系数（v2.3：整体下调膨胀系数）──
+    # ── 5. 对白密度与节奏基调（v2.5：膨胀系数已弃用，仅据对白密度选平均镜秒）──
     if dialogue_lines > 0 and total_lines > 0:
         dialogue_ratio = dialogue_lines / total_lines
     else:
         dialogue_ratio = 0.0
 
     if dialogue_ratio > 0.6:
-        expansion = 1.5
         pace_label = "对话主导型"
         pace_hint = "对话节奏快，一镜到底对话场景5-8s/镜，其余4-5s/镜（每镜一个主要动作或一次镜头变化）"
     elif dialogue_ratio > 0.3:
-        expansion = 1.8
         pace_label = "均衡型"
         pace_hint = "文戏动作交替，标准镜长4-6s/镜（复杂剧情12-15s或拆多镜）"
     else:
-        expansion = 2.0
         pace_label = "动作主导型"
         pace_hint = "视觉密度高，武戏2-3s/镜，其余4-5s/镜（每镜不超过一个主要动作）"
 
-    # ── 6. 时长估算（v2.3：用屏幕内容字符替代有效字符）──
-    # 中文剧本约5.5字/秒正常讲述节奏（比3.5字/秒更合理：剧本含大量格式化内容）
-    reading_seconds = max(screen_content_chars / 5.5, 10.0)
-    estimated_duration = reading_seconds * expansion
+    # ── 6. 时长估算（v2.5：镜数由密度决定，时长=镜数×镜秒，二者一致）──
+    SAFE_CAP = 28  # 单 LLM 调用安全镜数上限（防 8K token 输出截断）
 
-    # ── 7. 镜数估算 ──
+    # 平均镜秒：仅由对白密度决定节奏（不再用膨胀系数放大时长）
     if dialogue_ratio > 0.5:
         avg_shot_sec = 4.5  # 对话为主，切换快
     elif dialogue_ratio > 0.3:
@@ -549,30 +545,44 @@ def generate_duration_guide(script_text: str) -> str:
     else:
         avg_shot_sec = 4.0  # 动作为主但每个镜头也更短
 
-    estimated_shots = estimated_duration / avg_shot_sec
+    # ── 6.5 目标模式分流：用户指定目标时长 → 反推镜数（硬性目标）──
+    target_mode = target_duration_sec and target_duration_sec > 0
 
-    # 上下浮动范围
-    min_shots = max(int(estimated_shots * 0.75), scene_count * 2)
-    max_shots = int(estimated_shots * 1.35)
-
-    # ── 7.5 v2.3 硬上限裁剪（v2.4：进一步压低上限，解决长输出超时/token截断）──
-    # 规则1：单切块绝对上限30镜（过长输出会触发 LLM 超时与 8K token 截断，且稀释单镜质量）
-    ABSOLUTE_MAX_SHOTS = 30
-    # 规则2：基于屏幕内容密度上限：每35字最多1镜（确保每镜有足够视觉内容支撑80字描述）
-    density_max_shots = max(screen_content_chars // 35, scene_count * 3)
-    # 规则3：短剧本额外限制（<2500字内容直接封顶20镜，防止短剧分镜过碎且降低超时风险）
-    if screen_content_chars < 2500:
-        short_script_max = 20
+    if target_mode:
+        # 由目标时长反推目标镜数（与默认密度模型一致：时长=镜数×镜秒）
+        target_shots = max(round(target_duration_sec / avg_shot_sec), 1)
+        estimated_shots = target_shots
+        # 硬性目标：下限=目标×0.9，上限=目标×1.1，但单调用不超过 SAFE_CAP 护栏
+        min_shots = max(int(target_shots * 0.9), scene_count * 2, 3)
+        max_shots = int(target_shots * 1.1)
+        max_shots = min(max_shots, SAFE_CAP)  # token 安全护栏（长剧本单块≈25镜，不会触发）
+        min_shots = min(min_shots, max_shots)
+        min_shots = max(min_shots, scene_count * 2, 3)
+        estimated_duration = target_duration_sec
+        min_duration = int(target_duration_sec * 0.9)
+        max_duration = int(target_duration_sec * 1.1)
+        # 实际密度（字/镜）：用于提示词回显
+        effective_density = screen_content_chars / target_shots if target_shots else 24
+        capped = (int(target_shots * 1.1) > SAFE_CAP)
     else:
-        short_script_max = 9999
-    # 取四者最小值
-    max_shots = min(max_shots, ABSOLUTE_MAX_SHOTS, density_max_shots, short_script_max)
-    # 确保 min ≤ max 且不低于场景数×2
-    min_shots = min(min_shots, max_shots - 1)
-    min_shots = max(min_shots, scene_count * 2, 3)
-
-    min_duration = int(estimated_duration * 0.8)
-    max_duration = int(estimated_duration * 1.25)
+        # 默认密度模型（对齐 12000字≈45分钟 成片）
+        TARGET_CHARS_PER_SHOT = 24
+        estimated_shots = max(
+            screen_content_chars / TARGET_CHARS_PER_SHOT,
+            scene_count * 2,
+            3.0,
+        )
+        # 硬性下限要求（不再软参考）：下限=估算×0.85，上限=估算×1.25，受 SAFE_CAP 护栏
+        min_shots = max(int(estimated_shots * 0.85), scene_count * 2, 3)
+        max_shots = int(estimated_shots * 1.25)
+        max_shots = min(max_shots, SAFE_CAP)
+        min_shots = min(min_shots, max_shots)
+        min_shots = max(min_shots, scene_count * 2, 3)
+        estimated_duration = estimated_shots * avg_shot_sec
+        min_duration = int(estimated_duration * 0.8)
+        max_duration = int(estimated_duration * 1.25)
+        effective_density = TARGET_CHARS_PER_SHOT
+        capped = False
 
     def format_dur(s: float) -> str:
         m, sec = divmod(int(s), 60)
@@ -580,21 +590,36 @@ def generate_duration_guide(script_text: str) -> str:
             return f"{m}分{sec}秒"
         return f"{sec}秒"
 
-    # ── 8. 组装推荐文本（v2.3 措辞改为参考而非严格）──
+    # ── 8. 组装推荐文本（v2.6：硬性下限要求，目标模式可反推密度）──
+    if target_mode:
+        mode_label = "硬性目标（用户指定目标时长，已按本块字符占比分配）"
+        density_note = f"实际密度目标：约 1 镜 / {effective_density:.1f} 字（由目标时长反推，非字数密度）"
+        capped_note = "（受单次输出上限约束，本块已封顶，长剧本整体仍可达标）" if capped else ""
+        mandate = (f"★ 硬性目标：请瞄准上限 {max_shots} 镜{capped_note}；"
+                   f"严禁少于下限 {min_shots} 镜——若不足即视为拆分失败，必须补足至下限以上 ★")
+    else:
+        mode_label = "硬性下限（默认密度：约 1 镜 / 24 字，对应 12000 字≈45 分钟成片）"
+        density_note = f"目标密度：约 1 镜 / {effective_density:.0f} 字（对应 12000 字剧本≈45 分钟成片）"
+        capped_note = ""
+        mandate = (f"★ 硬性要求：请瞄准上限 {max_shots} 镜；"
+                   f"严禁少于下限 {min_shots} 镜——宁可多拆，也绝不要把多个动作/多句对白并进同一镜 ★")
+
     guide = f"""
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-【剧本体量分析 — 代码参考范围】
+【剧本体量分析 — {mode_label}】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   本切块统计：{effective_chars}总字符 / 约{screen_content_chars}屏幕内容字符 / {scene_count}场 / {dialogue_lines}句对白({dialogue_total_chars}字) / {action_lines}行动作描述
   对白密度：{dialogue_ratio:.0%} → {pace_label}（{pace_hint}）
-  参考总时长：{format_dur(min_duration)} ～ {format_dur(max_duration)}
-  参考总镜数：{min_shots} ～ {max_shots} 镜
+  目标总时长：{format_dur(min_duration)} ～ {format_dur(max_duration)}
+  硬性镜数要求：本块必须产出 {min_shots} ～ {max_shots} 镜（下限 {min_shots} 镜）
   平均镜长：约{avg_shot_sec:.0f}秒/镜
+  {density_note}
 
-  以上为代码参考范围，请结合剧本实际节奏和戏剧密度自主判断合理分镜数。
-  · 短剧本/动作密集段落 → 少镜+长镜，画面内容要丰富（不要为凑数拆分连贯动作）
-  · 长对话段落 → 可适当多镜，但要确保每镜都有独立的视觉价值
-  · 核心原则：宁可少出几个高质量镜头，也不要出一堆薄弱的凑数镜头
+  拆分铁律：
+  · 每个独立动作节拍、情绪转折、镜头运动、对白轮次都应是独立镜头
+  · 宁可多拆，也绝不要把多个动作/多句对话并进同一镜（避免内容过载被模型忽略）
+  · 核心原则：按节奏充分拆分，每镜都应有独立视觉价值；只有真正连贯不破的连续动作才合并
+  {mandate}
 
   Seedance 2.0 时长铁律：
   · 4-5秒/镜 = 一个主要动作或一次镜头变化（严禁塞入多个动作）
