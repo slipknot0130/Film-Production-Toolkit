@@ -175,36 +175,6 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # ── 分镜目标时长（密度控制）──
-    st.markdown("### 🎯 分镜目标时长（密度）")
-    st.caption("决定单集拆镜密度：短剧→镜头少而长；长剧→镜头多而密")
-    _dur_options = {
-        "自动（按剧本字数密度）": 0.0,
-        "短剧 · 2 分钟/集": 2.0,
-        "竖屏短剧 · 3 分钟/集": 3.0,
-        "标准 · 10 分钟/集": 10.0,
-        "长剧单集 · 45 分钟/集": 45.0,
-        "自定义": -1.0,
-    }
-    _dur_choice = st.selectbox(
-        "目标成片单集时长",
-        options=list(_dur_options.keys()),
-        index=0,
-        key="sb_target_duration_choice",
-        help="程序按目标时长反推每集镜头数。长剧需更长的剧本支撑（约 12000 字≈45 分钟）。",
-    )
-    if _dur_choice == "自定义":
-        _custom_min = st.number_input(
-            "自定义单集时长（分钟）",
-            min_value=0.5, max_value=180.0, value=18.0, step=0.5,
-            key="sb_target_duration_custom",
-        )
-        st.session_state.target_duration_min = _custom_min
-    else:
-        st.session_state.target_duration_min = _dur_options[_dur_choice]
-
-    st.markdown("---")
-
     # ── 工作模式Tab（核心导航）──
     # 注意：radio 不加 key，靠 index 控制选中项；用户手动点 radio 时通过 active_tab 返回值同步 session_state
     _TAB_OPTIONS = ["📝 剧本创作", "🎬 剧本分析", "💰 预算审计", "📋 场景拆解", "🎥 分镜工作台"]
@@ -240,6 +210,36 @@ with st.sidebar:
 
         # 视觉基调选择（分镜工作台专属）
         if active_tab == "🎥 分镜工作台":
+            st.markdown("---")
+
+            # ── 分镜目标时长（密度控制）── 仅分镜工作台显示
+            st.markdown("### 🎯 分镜目标时长（密度）")
+            st.caption("决定单集拆镜密度：短剧→镜头少而长；长剧→镜头多而密")
+            _dur_options = {
+                "自动（按剧本字数密度）": 0.0,
+                "短剧 · 2 分钟/集": 2.0,
+                "竖屏短剧 · 3 分钟/集": 3.0,
+                "标准 · 10 分钟/集": 10.0,
+                "长剧单集 · 45 分钟/集": 45.0,
+                "自定义": -1.0,
+            }
+            _dur_choice = st.selectbox(
+                "目标成片单集时长",
+                options=list(_dur_options.keys()),
+                index=0,
+                key="sb_target_duration_choice",
+                help="程序按目标时长反推每集镜头数。长剧需更长的剧本支撑（约 12000 字≈45 分钟）。",
+            )
+            if _dur_choice == "自定义":
+                _custom_min = st.number_input(
+                    "自定义单集时长（分钟）",
+                    min_value=0.5, max_value=180.0, value=18.0, step=0.5,
+                    key="sb_target_duration_custom",
+                )
+                st.session_state.target_duration_min = _custom_min
+            else:
+                st.session_state.target_duration_min = _dur_options[_dur_choice]
+
             st.markdown("---")
             st.markdown("### 🎨 视觉基调")
             st.caption("选择视觉参考方向，LLM 会结合剧本内容自动确定拍摄风格")
