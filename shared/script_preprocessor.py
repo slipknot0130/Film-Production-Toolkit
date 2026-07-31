@@ -554,10 +554,9 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         estimated_shots = target_shots
         # 硬性目标：下限=目标×0.9，上限=目标×1.1，但单调用不超过 SAFE_CAP 护栏
         min_shots = max(int(target_shots * 0.9), scene_count * 2, 3)
-        max_shots = int(target_shots * 1.1)
-        max_shots = min(max_shots, SAFE_CAP)  # token 安全护栏（长剧本单块≈25镜，不会触发）
-        min_shots = min(min_shots, max_shots)
-        min_shots = max(min_shots, scene_count * 2, 3)
+        max_shots = max(int(target_shots * 1.1), min_shots)  # 上限不得低于下限
+        max_shots = min(max_shots, SAFE_CAP)  # token 安全护栏
+        min_shots = min(min_shots, max_shots)  # 下限不得高于上限
         estimated_duration = target_duration_sec
         min_duration = int(target_duration_sec * 0.9)
         max_duration = int(target_duration_sec * 1.1)
@@ -574,10 +573,9 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         )
         # 硬性下限要求（不再软参考）：下限=估算×0.85，上限=估算×1.25，受 SAFE_CAP 护栏
         min_shots = max(int(estimated_shots * 0.85), scene_count * 2, 3)
-        max_shots = int(estimated_shots * 1.25)
+        max_shots = max(int(estimated_shots * 1.25), min_shots)  # 上限不得低于下限
         max_shots = min(max_shots, SAFE_CAP)
-        min_shots = min(min_shots, max_shots)
-        min_shots = max(min_shots, scene_count * 2, 3)
+        min_shots = min(min_shots, max_shots)  # 下限不得高于上限
         estimated_duration = estimated_shots * avg_shot_sec
         min_duration = int(estimated_duration * 0.8)
         max_duration = int(estimated_duration * 1.25)
