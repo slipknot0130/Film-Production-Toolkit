@@ -198,18 +198,74 @@ def call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.0,
 # =============================================================================
 
 def split_script_smart(text, max_chars=900):
-    """智能文本分块（900字符/块），按段落边界切分"""
-    paragraphs = text.split('\n')
-    chunks, current_chunk = [], ""
-    for p in paragraphs:
+    """智能文本分块（max_chars 字符/块）。
+
+    优先按换行/段落边界切分；若单个段落超过 max_chars，则对该段落做
+    二次切分（按句子边界，超长单句再按固定字符窗口硬切），确保**任何**
+    一个 chunk 都不会超过 max_chars。
+
+    历史 bug：旧实现对超过 max_chars 的单段落不再二次切分，导致整篇
+    几乎无换行的长剧本退化成 1 个超大块；该块在下游被 SAFE_CAP(28 镜)
+    封顶，最终只产出约 2 分钟分镜。本修复通过二次切分彻底解决。
+    """
+    if not text or not text.strip():
+        return []
+
+    chunks = []
+    current_chunk = ""
+
+    def _flush():
+        nonlocal current_chunk
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+        current_chunk = ""
+
+    # 句子/停顿分隔符（含中英文句号、感叹、问号、分号）
+    SENT_ENDERS = set("。！？!?；;\n")
+
+    def _split_long_paragraph(p):
+        """对超过 max_chars 的段落按句子/窗口二次切分，返回若干 <= max_chars 的子串。"""
+        pieces = []
+        buf = ""
+        for ch in p:
+            buf += ch
+            # 硬窗口保护：累积到上限且当前不是句末，立即切（防单句无限增长）
+            if len(buf) >= max_chars and ch not in SENT_ENDERS:
+                pieces.append(buf)
+                buf = ""
+            # 句末且已累积到一定量：在句末切，避免产生过碎的块
+            elif ch in SENT_ENDERS and len(buf) >= max_chars * 0.4:
+                pieces.append(buf)
+                buf = ""
+        if buf.strip():
+            pieces.append(buf.strip())
+        return pieces
+
+    for p in text.split('\n'):
+        p = p.rstrip('\n')
+        if not p.strip():
+            # 空行：收尾当前块（不强行跨段合并）
+            _flush()
+            continue
+
+        if len(p) > max_chars:
+            # 超长段落：先 flush 当前块，再对该段落二次切分
+            _flush()
+            for sub in _split_long_paragraph(p):
+                if len(current_chunk) + len(sub) > max_chars:
+                    _flush()
+                    current_chunk = sub + "\n"
+                else:
+                    current_chunk += sub + "\n"
+            continue
+
         if len(current_chunk) + len(p) > max_chars:
-            if current_chunk.strip():
-                chunks.append(current_chunk.strip())
+            _flush()
             current_chunk = p + "\n"
         else:
             current_chunk += p + "\n"
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
+
+    _flush()
     return chunks
 
 
