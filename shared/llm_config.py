@@ -645,3 +645,80 @@ def get_llm_kwargs(provider: str) -> dict:
         return {"extra_body": {"options": {"num_ctx": 100000, "num_predict": 8192}}}
     else:
         return {"max_tokens": 8192}
+
+
+# =============================================================================
+# 服务商单次输出上限（唯一真源）
+# =============================================================================
+# 各家 API 对 max_tokens 都有硬上限，**超过会直接返回 400，而不是自动截断**。
+# 历史 bug：分镜侧把 max_tokens 提到 16000、改编侧提到 16384~32768，
+# 在 DeepSeek（上限 8192）上一律请求失败，表现为「跑了很久却没有任何输出」。
+# 所有云端调用在传 max_tokens 前都应先过 clamp_max_tokens()。
+
+PROVIDER_MAX_OUTPUT: Dict[str, int] = {
+    "DeepSeek": 8192,
+    "硅基流动 SiliconFlow": 8192,
+    "阿里通义 Qwen": 8192,
+    "Kimi (Moonshot)": 8192,
+    "GLM (智谱)": 4095,
+    "零一万物 Yi": 4096,
+    "OpenAI": 16384,
+    "Claude (Anthropic)": 8192,
+    "Groq": 8192,
+    "Gemini (Google)": 8192,
+}
+
+# provider slug / 模型名关键词 → 上限（展示名对不上时的兜底匹配）
+_PROVIDER_CAP_ALIASES: Dict[str, int] = {
+    "deepseek": 8192,
+    "moonshot": 8192,
+    "kimi": 8192,
+    "siliconflow": 8192,
+    "硅基流动": 8192,
+    "qwen": 8192,
+    "dashscope": 8192,
+    "阿里通义": 8192,
+    "zhipu": 4095,
+    "bigmodel": 4095,
+    "glm": 4095,
+    "零一万物": 4096,
+    "lingyi": 4096,
+    "openai": 16384,
+    "gpt-": 16384,
+    "anthropic": 8192,
+    "claude": 8192,
+    "groq": 8192,
+    "gemini": 8192,
+}
+
+DEFAULT_MAX_OUTPUT = 8192
+
+
+def resolve_output_cap(provider: str = "", model_name: str = "", extra_hint: str = "") -> int:
+    """返回该服务商单次输出 token 上限。返回 0 表示不钳制（本地模型自行决定）。"""
+    for key in (provider or "", extra_hint or ""):
+        if key in PROVIDER_MAX_OUTPUT:
+            return PROVIDER_MAX_OUTPUT[key]
+
+    hay = f"{provider} {model_name} {extra_hint}".lower()
+    if "ollama" in hay or "本地" in hay or "localhost" in hay:
+        return 0
+
+    for alias, cap in _PROVIDER_CAP_ALIASES.items():
+        if alias in hay:
+            return cap
+    return DEFAULT_MAX_OUTPUT
+
+
+def clamp_max_tokens(max_tokens, provider: str = "", model_name: str = "", extra_hint: str = ""):
+    """把 max_tokens 钳制到服务商允许的上限内。
+
+    None / 0 原样返回（表示调用方不想设限）。
+    本地模型（Ollama）不钳制。
+    """
+    if not max_tokens:
+        return max_tokens
+    cap = resolve_output_cap(provider, model_name, extra_hint)
+    if cap and max_tokens > cap:
+        return cap
+    return max_tokens

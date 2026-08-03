@@ -448,6 +448,18 @@ def count_internal_external_scenes(script_text: str) -> tuple:
     return internal, external
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 分镜密度模型常量（**唯一真源**）
+# ─────────────────────────────────────────────────────────────────────────────
+# 这三个值以前散落在 generate_duration_guide 内部（局部变量）和 ui_production.py
+# 里（写死的魔法数字 24 / 5.0 / 28），改一处忘一处，导致 UI 预估值和引擎实际
+# 产出长期对不上。现统一提升为模块级常量，所有调用方一律从这里导入。
+
+SAFE_CAP = 28              # 单次 LLM 调用安全镜数上限（防 8K token 输出被截断）
+TARGET_CHARS_PER_SHOT = 20  # 默认密度：12000字≈45分钟(4.5s/镜) → 5000字≈18.75分钟
+DEFAULT_AVG_SHOT_SEC = 4.5  # 默认平均镜长（秒），与 UI 预估口径保持一致
+
+
 def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) -> str:
     """
     v2.3：代码层分析剧本体量，生成分镜时长/镜数推荐。
@@ -535,7 +547,7 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         pace_hint = "视觉密度高，武戏2-3s/镜，其余4-5s/镜（每镜不超过一个主要动作）"
 
     # ── 6. 时长估算（v2.5：镜数由密度决定，时长=镜数×镜秒，二者一致）──
-    SAFE_CAP = 28  # 单 LLM 调用安全镜数上限（防 8K token 输出截断）
+    # SAFE_CAP / TARGET_CHARS_PER_SHOT 已提升为模块级常量，此处直接引用
 
     # 平均镜秒：仅由对白密度决定节奏（不再用膨胀系数放大时长）
     if dialogue_ratio > 0.5:
@@ -561,11 +573,12 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         min_duration = int(target_duration_sec * 0.9)
         max_duration = int(target_duration_sec * 1.1)
         # 实际密度（字/镜）：用于提示词回显
-        effective_density = screen_content_chars / target_shots if target_shots else 24
+        effective_density = (
+            screen_content_chars / target_shots if target_shots else TARGET_CHARS_PER_SHOT
+        )
         capped = (int(target_shots * 1.1) > SAFE_CAP)
     else:
-        # 默认密度模型（对齐 12000字≈45分钟 成片）
-        TARGET_CHARS_PER_SHOT = 20  # 对齐用户成片密度：12000字≈45分钟(4.5s/镜) → 5000字≈18.75分钟
+        # 默认密度模型（对齐 12000字≈45分钟 成片）——常量见模块顶部
         estimated_shots = max(
             screen_content_chars / TARGET_CHARS_PER_SHOT,
             scene_count * 2,
@@ -596,7 +609,14 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         mandate = (f"★ 硬性目标：请瞄准上限 {max_shots} 镜{capped_note}；"
                    f"严禁少于下限 {min_shots} 镜——若不足即视为拆分失败，必须补足至下限以上 ★")
     else:
-        mode_label = "硬性下限（默认密度：约 1 镜 / 24 字，对应 12000 字≈45 分钟成片）"
+        # 注意：这里必须引用常量，不能写死数字。
+        # 历史 bug：常量已从 24 调到 20，但这行仍写着「24 字」，
+        # 同一段提示词内自相矛盾（上面说 24、下面 density_note 说 20），
+        # 会直接削弱模型对硬性下限的遵守度。
+        mode_label = (
+            f"硬性下限（默认密度：约 1 镜 / {TARGET_CHARS_PER_SHOT:.0f} 字，"
+            f"对应 12000 字≈45 分钟成片）"
+        )
         density_note = f"目标密度：约 1 镜 / {effective_density:.0f} 字（对应 12000 字剧本≈45 分钟成片）"
         capped_note = ""
         mandate = (f"★ 硬性要求：请瞄准上限 {max_shots} 镜；"

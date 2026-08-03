@@ -88,6 +88,54 @@ logger = logging.getLogger(__name__)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 服务商单次输出上限（防 400 invalid_request_error）
+# ═════════════════════════════════════════════════════════════════════════════
+# 各家 API 对 max_tokens（单次输出）都有硬上限，超过会直接返回 400 而不是截断。
+# 历史 bug（5963d44 引入）：为防截断把 max_tokens 提到 16000，结果 DeepSeek
+# （上限 8192）直接拒绝请求，三次重试全挂 → 整篇分镜零输出。
+# 宁可靠 SAFE_CAP(28镜/块) 控制输出量，也不能把请求打成 400。
+#
+# 上限表的唯一真源在 shared/llm_config.py。这里用 try/except 导入，是因为
+# 本模块刻意不依赖 streamlit（run_production_pipeline 支持无头独立运行），
+# 而 llm_config 顶层 import streamlit。无头环境下降级为保守的固定上限。
+
+try:
+    from shared.llm_config import (
+        clamp_max_tokens as _shared_clamp,
+        resolve_output_cap as _shared_resolve,
+    )
+except Exception:  # pragma: no cover - 仅无 streamlit 的无头环境走到
+    _shared_clamp = None
+    _shared_resolve = None
+
+FALLBACK_MAX_OUTPUT = 8192
+
+
+def resolve_output_cap(engine_choice: str = "", provider: str = "", model_name: str = "") -> int:
+    """返回该服务商单次输出 token 上限。返回 0 表示不限制（本地模型）。"""
+    if _shared_resolve is not None:
+        return _shared_resolve(provider, model_name, engine_choice)
+    hay = f"{engine_choice} {provider} {model_name}".lower()
+    if "ollama" in hay or "本地" in hay or "localhost" in hay:
+        return 0
+    return FALLBACK_MAX_OUTPUT
+
+
+def clamp_max_tokens(max_tokens, engine_choice: str = "", provider: str = "", model_name: str = ""):
+    """把 max_tokens 钳制到服务商允许的上限内；None/0 原样返回（表示不设限）。"""
+    if not max_tokens:
+        return max_tokens
+    cap = resolve_output_cap(engine_choice, provider, model_name)
+    if cap and max_tokens > cap:
+        logger.warning(
+            f"[clamp_max_tokens] max_tokens={max_tokens} 超出 "
+            f"{engine_choice or provider or 'unknown'} 的输出上限 {cap}，已自动下调为 {cap}"
+        )
+        return cap
+    return max_tokens
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # LLM 工厂（不变）
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -849,6 +897,30 @@ def _format_timecode(total_seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+_NUM_RE = re.compile(r'-?\d+(?:\.\d+)?')
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """把 LLM 返回的任意值安全转成 float。
+
+    模型实际会返回 4.5 / "4.5" / "5秒" / "约4.5s" / "" / None / [] 等各种形态。
+    裸 float() 遇到后两类会抛异常，若发生在批量组装循环里会导致**整块分镜被丢弃**。
+    这里统一：数字直取，字符串抽第一个数字，其余一律回落 default。
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        m = _NUM_RE.search(value)
+        if m:
+            try:
+                return float(m.group())
+            except ValueError:
+                return default
+    return default
+
+
 def _inject_references(content: str, scene_name: str, characters: list) -> str:
     """
     在画面内容中自动插入 @角色名 引用。
@@ -1017,7 +1089,10 @@ def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) 
         shots = []
 
     if not shots:
-        return [], time_offset_seconds, global_atmosphere
+        # 返回 0.0 而非 time_offset_seconds：本函数第二个返回值的约定是
+        # 「本块新增时长（增量）」（见末尾 total_seconds = accumulated - time_offset_seconds）。
+        # 这里若回传绝对偏移量，调用方一旦做 accumulated += total_secs 就会重复累加。
+        return [], 0.0, global_atmosphere
 
     # 预计算全局氛围摘要（用于 Section 4 静态描述注入）
     global_atmo_summary = ""
@@ -1044,7 +1119,9 @@ def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) 
         felt_intent = str(shot.get("felt_intent", "")).strip()
         # v4.7：每镜时长下限 4.0 秒、默认 4.5 秒（对齐 12000字≈45分钟 的 4.5s/镜模型），
         # 防止模型把每镜压到 2~3 秒导致总时长塌缩。
-        duration = max(float(shot.get("时长秒", 4.5)), 4.0)
+        # 用 _safe_float 兜底：模型偶尔会返回 "5秒" / "4.5s" / null / "" 等脏值，
+        # 裸 float() 会抛 ValueError/TypeError，被上层 except 吞掉后**整块分镜丢失**。
+        duration = max(_safe_float(shot.get("时长秒"), 4.5), 4.0)
         shot_type = str(shot.get("景别", "")).strip()
         camera_pos = str(shot.get("机位", "")).strip()
         composition = str(shot.get("构图", "")).strip()
@@ -1453,9 +1530,11 @@ def run_crew_on_chunk(
         pass
     
     # ── 构建主用 LLM（Director + QA 各自独立，均显式限制 max_tokens 防截断）──
+    # max_tokens 必须按服务商钳制：超过上限不是「被截断」，而是直接 400 请求失败。
+    director_max_tokens = clamp_max_tokens(max_tokens, engine_choice, provider, model_name)
     director_llm = create_llm(
         engine_choice, api_base, api_key, model_name,
-        provider=provider, timeout=timeout, max_tokens=max_tokens
+        provider=provider, timeout=timeout, max_tokens=director_max_tokens
     )
     if qa_model_name and qa_provider:
         effective_qa_api_base = qa_api_base or api_base
@@ -1467,7 +1546,7 @@ def run_crew_on_chunk(
             qa_model_name,
             provider=qa_provider,
             timeout=qa_timeout,
-            max_tokens=max_tokens,
+            max_tokens=clamp_max_tokens(max_tokens, engine_choice, qa_provider, qa_model_name),
         )
         logger.info(
             f"[run_crew_on_chunk] Director={provider}/{model_name} timeout={timeout}s | "
@@ -1489,7 +1568,9 @@ def run_crew_on_chunk(
             fallback_model_name,
             provider=fallback_provider,
             timeout=fallback_timeout,
-            max_tokens=max_tokens,
+            max_tokens=clamp_max_tokens(
+                max_tokens, engine_choice, fallback_provider, fallback_model_name
+            ),
         )
         logger.info(
             f"[run_crew_on_chunk] 已配置跨服务商降级: {fallback_provider}/{fallback_model_name} "
@@ -1511,6 +1592,7 @@ def run_crew_on_chunk(
     result = None
     used_fallback = False
     last_err = None
+    winning_llm = director_llm  # 本轮真正跑通的 Director LLM，供后续补足重跑复用
     for d_llm, q_llm, director_only, label in attempts:
         try:
             agents = create_agents(d_llm, q_llm)
@@ -1523,6 +1605,7 @@ def run_crew_on_chunk(
                 'duration_guide': duration_guide
             })
             used_fallback = (label != "primary-full-crew")
+            winning_llm = d_llm
             logger.info(f"[run_crew_on_chunk] 尝试成功 [{label}]")
             break
         except Exception as e:
@@ -1552,8 +1635,10 @@ def run_crew_on_chunk(
             f"{min_shots} 镜，严重不足。请立刻把剩余未拆的动作节拍、对白轮次、转场、情绪转折"
             f"全部拆成新镜头，必须产出 ≥ {min_shots} 镜；宁可多拆，绝不要少于下限。"
         )
+        # 用 winning_llm 而非 director_llm：若首轮是靠降级模型跑通的，
+        # 这里再用（已经超时/不可用的）主模型重跑，只会白等一个 timeout。
         r_shots, r_secs, r_atmo = _attempt_director_only(
-            director_llm, script_input, effective_style, char_injection, retry_guide, time_offset_seconds
+            winning_llm, script_input, effective_style, char_injection, retry_guide, time_offset_seconds
         )
         if len(r_shots) > len(shot_list):
             shot_list, total_seconds, global_atmosphere = r_shots, r_secs, (r_atmo or global_atmosphere)

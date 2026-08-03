@@ -21,12 +21,26 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-# 桩：shared.script_preprocessor 可能顶层 import streamlit
+# 桩：shared.script_preprocessor / production.llm_utils 顶层 import streamlit、openai。
+# 这两个都是纯算法测试，不该因为重型 SDK 未装/版本不匹配就跑不起来。
 _fake_st = types.ModuleType("streamlit")
 for _a in ("toast", "error", "warning", "info"):
     setattr(_fake_st, _a, lambda *a, **k: None)
 _fake_st.session_state = {}
 sys.modules.setdefault("streamlit", _fake_st)
+
+if "openai" not in sys.modules:
+    try:
+        import openai  # noqa: F401
+    except Exception:
+        for _m in [k for k in sys.modules if k == "openai" or k.startswith("openai.")]:
+            sys.modules.pop(_m, None)
+        _fake_openai = types.ModuleType("openai")
+        _fake_openai.OpenAI = object
+        _fake_openai.APIError = Exception
+        _fake_openai.APIConnectionError = Exception
+        _fake_openai.RateLimitError = Exception
+        sys.modules["openai"] = _fake_openai
 
 from shared.script_preprocessor import generate_duration_guide  # noqa: E402
 from production.llm_utils import split_script_smart  # noqa: E402

@@ -1120,21 +1120,28 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
             10.0: "标准 · 10 分钟/集",
             45.0: "长剧单集 · 45 分钟/集",
         }
+        # 密度常量统一从引擎侧导入，避免 UI 预估与实际产出口径漂移
+        from shared.script_preprocessor import (
+            SAFE_CAP as _SAFE_CAP,
+            TARGET_CHARS_PER_SHOT as _CHARS_PER_SHOT,
+            DEFAULT_AVG_SHOT_SEC as _AVG_SHOT_SEC,
+        )
+
         if _target_duration_min > 0:
             _mode_label = _dur_display_map.get(_target_duration_min, f"自定义 {_target_duration_min} 分钟/集")
-            _est_shots = max(int(_target_duration_min * 60.0 / 5.0), 1)
+            _est_shots = max(int(_target_duration_min * 60.0 / _AVG_SHOT_SEC), 1)
             st.info(f"🎯 当前分镜密度模式：{_mode_label}，预计总镜数约 {_est_shots} 镜（参考时长）")
         else:
-            _est_shots = max(int(_total_script_chars / 24), 1)
-            _est_min = _est_shots * 5.0 / 60.0
+            _est_shots = max(int(_total_script_chars / _CHARS_PER_SHOT), 1)
+            _est_min = _est_shots * _AVG_SHOT_SEC / 60.0
             st.info(f"🎯 当前分镜密度模式：自动（按剧本字数密度），预计总镜数约 {_est_shots} 镜（参考时长约 {_est_min:.0f} 分钟）")
 
         # 前置可行性检查：剧本偏短 / 目标偏大时，单块 SAFE_CAP 护栏无法达成目标，提前警告
         if _target_duration_min > 0:
-            _avg = 5.0
+            _avg = _AVG_SHOT_SEC
             _theoretical_shots = _target_duration_min * 60.0 / _avg
-            _max_safe_sec = len(chunks) * 28 * _avg
-            if _theoretical_shots > len(chunks) * 28:
+            _max_safe_sec = len(chunks) * _SAFE_CAP * _avg
+            if _theoretical_shots > len(chunks) * _SAFE_CAP:
                 st.warning(
                     f"⚠️ 目标 {_target_duration_min:.0f} 分钟约需 {int(_theoretical_shots)} 镜，"
                     f"但当前剧本（{len(script_content)} 字）在单块安全上限下最多约 "

@@ -1061,6 +1061,11 @@ def _rewrite_single_chunk(client, model, provider, style_prompt: str,
     is_ollama = "Ollama" in provider
     # 每块改写的 max_tokens = 集数 × 2500，最低 8192，最高 32768
     chunk_max_tokens = max(8192, min(32768, tgt_count * 2500))
+    if not is_ollama:
+        # 云端服务商必须钳制：超上限不是被截断，而是整个请求 400 失败。
+        # DeepSeek 上限 8192，tgt_count ≥ 4 时这里就会算出 10000+ 直接打挂。
+        from shared.llm_config import clamp_max_tokens
+        chunk_max_tokens = clamp_max_tokens(chunk_max_tokens, provider, model)
     if is_ollama:
         chunk_kwargs = dict(
             model=model,
@@ -1387,6 +1392,10 @@ def _render_script_rewrite():
                 if is_ollama:
                     extra = {"extra_body": {"options": {"num_ctx": 131072, "num_predict": max(16384, min(131072, dynamic_max_tokens))}}}
                 else:
+                    # 云端服务商必须钳制：这里的下限是 16384，而 DeepSeek 上限只有 8192，
+                    # 不钳制的话该路径对 DeepSeek **必然 400**，表现为「跑了很久毫无输出」。
+                    from shared.llm_config import clamp_max_tokens
+                    dynamic_max_tokens = clamp_max_tokens(dynamic_max_tokens, provider, model)
                     extra = {"max_tokens": dynamic_max_tokens}
 
                 if tgt_ep > 0:
@@ -1568,6 +1577,10 @@ def _render_script_rewrite():
 
                     is_ollama = "Ollama" in provider
                     supplement_max = max(8192, min(32768, missing_count * 2500))
+                    if not is_ollama:
+                        # 同上：云端服务商超上限会 400，必须钳制
+                        from shared.llm_config import clamp_max_tokens
+                        supplement_max = clamp_max_tokens(supplement_max, provider, model)
                     if is_ollama:
                         supp_kwargs = dict(
                             model=model,
@@ -1757,10 +1770,13 @@ def _render_cross_mode_bridge(script_text, analysis_feedback):
                 st.caption(f"📝 {log}")
 
         # 检查是否已修改完成（由线程设置 cross_mode_modified_script）
+        _poll_key = "ui_creator_crossmode_poll_count"
         if st.session_state.get("cross_mode_modified_script"):
+            # 任务完成必须清零计数：否则同一 session 内第二个长任务会继承上一次的
+            # 累计轮询数，还没跑几分钟就被误判为「30分钟超时」。
+            st.session_state[_poll_key] = 0
             st.rerun()
         else:
-            _poll_key = "ui_creator_crossmode_poll_count"
             _poll_count = st.session_state.get(_poll_key, 0) + 1
             if _poll_count > 900:  # 900 × 2s ≈ 30 分钟超时
                 st.session_state[_poll_key] = 0
@@ -2004,11 +2020,23 @@ def _render_modification_report(report: dict, original_script: str, analysis_fee
         import pandas as pd
         df = pd.DataFrame(suggestions)
         # 保证列顺序
-        col_order = ["priority", "category", "episode", "issue", "suggestion", "expected_effect"]
+        # 列名映射必须按「字段名」而非「位置」。
+        # 历史 bug：用 labels[i] 按位置取名，一旦 LLM 只返回部分字段
+        #（例如缺 priority），episode 就会被错标成「优先级」，展示完全串位。
+        label_map = {
+            "priority": "优先级",
+            "category": "类别",
+            "episode": "涉及集数",
+            "issue": "问题",
+            "suggestion": "建议",
+            "expected_effect": "预期效果",
+        }
+        col_order = list(label_map.keys())
         present_cols = [c for c in col_order if c in df.columns]
-        df = df[present_cols]
-        labels = ["优先级", "类别", "涉及集数", "问题", "建议", "预期效果"]
-        df.columns = [labels[i] for i in range(len(present_cols))]
+        # 保留 col_order 之外的额外字段，避免 LLM 多返回的信息被静默丢弃
+        extra_cols = [c for c in df.columns if c not in col_order]
+        df = df[present_cols + extra_cols]
+        df.columns = [label_map[c] for c in present_cols] + extra_cols
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     # 预计影响
@@ -2702,8 +2730,8 @@ def render_creator():
             else:
                 st.info("📭 日志区域\n\n点击「启动多智能体编剧工坊」开始生成大纲")
 
+            _poll_key = "ui_creator_workflow_poll_count"
             if _ss("workflow_running"):
-                _poll_key = "ui_creator_workflow_poll_count"
                 _poll_count = st.session_state.get(_poll_key, 0) + 1
                 if _poll_count > 900:  # 900 × 2s ≈ 30 分钟超时
                     _set_ss("workflow_running", False)
@@ -2713,6 +2741,11 @@ def render_creator():
                     st.session_state[_poll_key] = _poll_count
                     time.sleep(2)
                     st.rerun()
+            elif st.session_state.get(_poll_key):
+                # 工作流已结束（正常完成或手动停止）→ 计数清零。
+                # 否则同一 session 内第二次启动工作流会继承上一次的累计轮询数，
+                # 导致刚跑几分钟就被误判为「30分钟超时」。
+                st.session_state[_poll_key] = 0
 
         # =====================================================================
         # Tab B：剧本改编

@@ -948,6 +948,14 @@ def call_llm(
 ) -> AgentResult:
     """调用 LLM 生成内容"""
     try:
+        # 按模型名钳制输出上限：超上限的 max_tokens 会让服务商直接返回 400，
+        # 而不是自动截断。典型坑：默认 8192 在 GLM（上限 4095）上必挂。
+        try:
+            from shared.llm_config import clamp_max_tokens
+            max_tokens = clamp_max_tokens(max_tokens, model_name=model)
+        except Exception:
+            pass
+
         response = client.chat.completions.create(
             model=model,
             messages=[

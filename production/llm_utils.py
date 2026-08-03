@@ -244,8 +244,15 @@ def split_script_smart(text, max_chars=900):
     for p in text.split('\n'):
         p = p.rstrip('\n')
         if not p.strip():
-            # 空行：收尾当前块（不强行跨段合并）
-            _flush()
+            # 空行：仅作为段落分隔符保留，**不**强制收尾当前块。
+            #
+            # 历史 bug（31ee631 引入）：这里曾直接 _flush()，导致
+            # 「场标 + 空行 + 台词 + 空行 + 动作」这类最常规的剧本排版
+            # 被打碎成几十上百个十几字的小块。下游 Crew 会对每个块各跑
+            # 一次 Director+QA，既极慢又产出大量垃圾镜头。
+            # 正确策略：空行只写入分隔符，真正的切块只由 max_chars 决定。
+            if current_chunk and not current_chunk.endswith("\n\n"):
+                current_chunk += "\n"
             continue
 
         if len(p) > max_chars:

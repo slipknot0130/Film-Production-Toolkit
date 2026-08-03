@@ -21,7 +21,8 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-# 桩：production.llm_utils 顶层 import streamlit；本测试不依赖真实 streamlit。
+# 桩：production.llm_utils 顶层 import streamlit / openai；
+# split_script_smart 是纯文本函数，不该因为这两个重型 SDK 装不上就跑不了测试。
 _fake_st = types.ModuleType("streamlit")
 _fake_st.toast = lambda *a, **k: None
 _fake_st.error = lambda *a, **k: None
@@ -29,6 +30,19 @@ _fake_st.warning = lambda *a, **k: None
 _fake_st.info = lambda *a, **k: None
 _fake_st.session_state = {}
 sys.modules.setdefault("streamlit", _fake_st)
+
+if "openai" not in sys.modules:
+    try:
+        import openai  # noqa: F401
+    except Exception:
+        for _m in [k for k in sys.modules if k == "openai" or k.startswith("openai.")]:
+            sys.modules.pop(_m, None)
+        _fake_openai = types.ModuleType("openai")
+        _fake_openai.OpenAI = object
+        _fake_openai.APIError = Exception
+        _fake_openai.APIConnectionError = Exception
+        _fake_openai.RateLimitError = Exception
+        sys.modules["openai"] = _fake_openai
 
 from production.llm_utils import split_script_smart  # noqa: E402
 
@@ -92,6 +106,77 @@ def test_mixed_long_and_normal_segments():
 def test_empty_input():
     assert split_script_smart("", max_chars=MAX_CHARS) == []
     assert split_script_smart("   \n  \n", max_chars=MAX_CHARS) == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 回归：空行不得触发强制切块（2026-07-30 二次事故）
+# ─────────────────────────────────────────────────────────────────────────────
+# 上一版修复引入了「遇空行即 _flush()」，导致「场标 + 空行 + 台词 + 空行」这种
+# 最常规的剧本排版被打碎成几十上百个十几字的碎块。下游对每个碎块各跑一次
+# Director+QA，既极慢又产出垃圾镜头。首版测试全部用 "\n".join 构造，
+# 没有任何空行用例，所以完全没抓到 —— 这里补齐。
+
+_SCREENPLAY = """\
+第1场 深夜 内景 林晚的公寓 雨
+
+林晚站在窗前，雨点砸在玻璃上。
+
+林晚：（声音发颤）这些年，你到底瞒了我什么？
+
+陈默沉默半晌，缓缓转过身来。
+
+陈默：那个雨夜的事，我一直没敢说。
+
+远处传来一声闷响，门被人推开。
+
+第2场 同夜 内景 走廊
+
+一个意想不到的身影出现在门口，逆光看不清脸。
+
+林晚猛地后退一步，撞翻了身后的花瓶。
+"""
+
+
+def test_blank_lines_do_not_shatter_into_tiny_chunks():
+    """常规剧本排版（段落之间有空行）不得被打碎成大量碎块。"""
+    chunks = split_script_smart(_SCREENPLAY, max_chars=MAX_CHARS)
+    assert chunks, "应至少切出 1 块"
+    assert all(len(c) <= MAX_CHARS for c in chunks)
+
+    total_chars = sum(len(c) for c in chunks)
+    avg_len = total_chars / len(chunks)
+    # 该剧本约 200 余字，max_chars=550 → 合理结果是 1 块。
+    # 出 bug 时会切出 10+ 块、平均长度不到 20 字。
+    assert len(chunks) <= 2, f"被切成 {len(chunks)} 块（应 ≤2）：{[len(c) for c in chunks]}"
+    assert avg_len > 100, f"平均块长仅 {avg_len:.1f} 字，说明空行触发了错误的强制切块"
+
+
+def test_blank_line_script_chunk_count_scales_with_length():
+    """放大到 5000 字的带空行剧本：块数应由 max_chars 决定，而非由空行数量决定。"""
+    long_script = (_SCREENPLAY + "\n") * 25          # ≈ 5000+ 字，含大量空行
+    chunks = split_script_smart(long_script, max_chars=MAX_CHARS)
+
+    assert all(len(c) <= MAX_CHARS for c in chunks)
+    expected = len(long_script) / MAX_CHARS          # 理论块数
+    # 允许 2.5 倍冗余（边界对齐会产生一些未填满的块），
+    # 但出 bug 时块数会是理论值的 20 倍以上。
+    assert len(chunks) <= expected * 2.5, (
+        f"切出 {len(chunks)} 块，理论仅需约 {expected:.0f} 块 —— 空行导致过度切块"
+    )
+    assert sum(len(c) for c in chunks) / len(chunks) > MAX_CHARS * 0.3, "平均块长过低"
+
+
+def test_blank_lines_preserve_paragraph_separation():
+    """空行应作为段落分隔保留在块内，不能把相邻段落粘成一行。"""
+    text = "第1场 内景 客厅\n\n林晚：你回来了。\n\n陈默点头。"
+    chunks = split_script_smart(text, max_chars=MAX_CHARS)
+    assert len(chunks) == 1
+    joined = chunks[0]
+    assert "第1场 内景 客厅" in joined
+    assert "林晚：你回来了。" in joined
+    assert "陈默点头。" in joined
+    # 段落之间必须仍有换行，不能退化成 "客厅林晚：你回来了。"
+    assert "客厅林晚" not in joined
 
 
 if __name__ == "__main__":
