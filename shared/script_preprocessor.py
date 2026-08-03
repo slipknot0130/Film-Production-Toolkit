@@ -456,7 +456,7 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
     返回格式化的推荐字符串，直接注入 Director Agent 的 prompt。
 
     v2.6 重大升级：支持「用户指定目标时长」驱动拆镜密度。
-      - target_duration_sec <= 0：沿用默认密度模型（约 1 镜 / 24 字，对应 12000 字≈45 分钟成片），
+      - target_duration_sec <= 0：沿用默认密度模型（约 1 镜 / 20 字，对应 12000 字≈45 分钟成片，5000 字≈18.75 分钟），
         作为硬性下限要求（不再软参考）。
       - target_duration_sec >  0：按目标时长反推镜数（镜数 = 目标秒 ÷ 平均镜秒），
         作为硬性目标——分块模式下各块按字符占比分摊目标时长，单块目标受 SAFE_CAP 护栏兜底。
@@ -565,7 +565,7 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         capped = (int(target_shots * 1.1) > SAFE_CAP)
     else:
         # 默认密度模型（对齐 12000字≈45分钟 成片）
-        TARGET_CHARS_PER_SHOT = 24
+        TARGET_CHARS_PER_SHOT = 20  # 对齐用户成片密度：12000字≈45分钟(4.5s/镜) → 5000字≈18.75分钟
         estimated_shots = max(
             screen_content_chars / TARGET_CHARS_PER_SHOT,
             scene_count * 2,

@@ -1042,7 +1042,9 @@ def assemble_seedance_prompt(shot_data: dict, time_offset_seconds: float = 0.0) 
         shot_num = shot.get("镜头号", len(shot_list) + 1)
         scene_name = str(shot.get("场景名", "")).strip()
         felt_intent = str(shot.get("felt_intent", "")).strip()
-        duration = max(float(shot.get("时长秒", 4)), 1.0)
+        # v4.7：每镜时长下限 4.0 秒、默认 4.5 秒（对齐 12000字≈45分钟 的 4.5s/镜模型），
+        # 防止模型把每镜压到 2~3 秒导致总时长塌缩。
+        duration = max(float(shot.get("时长秒", 4.5)), 4.0)
         shot_type = str(shot.get("景别", "")).strip()
         camera_pos = str(shot.get("机位", "")).strip()
         composition = str(shot.get("构图", "")).strip()
@@ -1312,6 +1314,62 @@ def _validate_min_content(shot_list: list):
                 shot["终极Seedance提示词"] = prompt + f"\n⚠️[画面描述仅{len(content_text)}字，可能不够丰富]"
 
 
+def _result_to_shots(result, time_offset_seconds):
+    """把 CrewAI 返回结果解析并组装为 4 列分镜数据。返回 (shot_list, total_seconds, global_atmosphere)。"""
+    qa_raw = ""
+    director_raw = ""
+    if hasattr(result, 'tasks_output') and result.tasks_output:
+        # 完整 Crew：最后一个 task 是 QA
+        director_raw = result.tasks_output[0].raw if len(result.tasks_output) >= 1 else ""
+        qa_raw = result.tasks_output[-1].raw if len(result.tasks_output) >= 2 else director_raw
+    elif hasattr(result, 'raw'):
+        qa_raw = result.raw
+    else:
+        qa_raw = str(result)
+
+    if not qa_raw and not director_raw:
+        return [], 0.0, ""
+
+    shot_data = parse_structured_json(qa_raw)
+    if not shot_data and director_raw:
+        # 回退：尝试从 Director 输出解析（如果 QA 输出不可解析）
+        shot_data = parse_structured_json(director_raw)
+
+    if not shot_data:
+        return [], 0.0, ""
+
+    return assemble_seedance_prompt(shot_data, time_offset_seconds)
+
+
+def _parse_min_shots(guide_text):
+    """从 generate_duration_guide 文本中提取本块镜头数下限（硬性要求）。"""
+    if not guide_text:
+        return 0
+    m = re.search(r'本块必须产出\s*(\d+)\s*～\s*(\d+)\s*镜', guide_text)
+    return int(m.group(1)) if m else 0
+
+
+def _attempt_director_only(d_llm, script_input, effective_style, char_injection, duration_guide, time_offset_seconds):
+    """仅用 Director 重跑一次（跳过 QA，省一次长上下文调用），返回 4 列分镜数据。
+
+    用于镜头数未达指南下限时的「补足重跑」：用更强指令要求模型把剩余内容拆足。
+    """
+    try:
+        agents = create_agents(d_llm, d_llm)
+        tasks = create_tasks(agents)
+        crew = create_crew_director_only(agents, tasks)
+        result = crew.kickoff(inputs={
+            'script': script_input,
+            'style': effective_style,
+            'char_injection': char_injection,
+            'duration_guide': duration_guide,
+        })
+        return _result_to_shots(result, time_offset_seconds)
+    except Exception as e:
+        logger.warning(f"[run_crew_on_chunk] 补足重跑失败: {type(e).__name__}: {e}")
+        return [], 0.0, ""
+
+
 def run_crew_on_chunk(
     chunk: str,
     global_chars: str,
@@ -1328,7 +1386,7 @@ def run_crew_on_chunk(
     qa_model_name: str = "",
     qa_provider: str = "",
     qa_timeout: int = 600,
-    max_tokens: int = 8000,
+    max_tokens: int = 16000,
     fallback_api_base: str = "",
     fallback_api_key: str = "",
     fallback_model_name: str = "",
@@ -1476,34 +1534,35 @@ def run_crew_on_chunk(
         logger.error(f"[run_crew_on_chunk] 所有重试均失败，最后错误: {last_err}", exc_info=True)
         return [], 0.0, ""
 
-    # ── 提取输出 ──
-    qa_raw = ""
-    director_raw = ""
-    if hasattr(result, 'tasks_output') and result.tasks_output:
-        # 完整 Crew：最后一个 task 是 QA
-        director_raw = result.tasks_output[0].raw if len(result.tasks_output) >= 1 else ""
-        qa_raw = result.tasks_output[-1].raw if len(result.tasks_output) >= 2 else director_raw
-    elif hasattr(result, 'raw'):
-        qa_raw = result.raw
-    else:
-        qa_raw = str(result)
-
-    if not qa_raw and not director_raw:
+    # ── 提取输出 + 代码组装 ──
+    shot_list, total_seconds, global_atmosphere = _result_to_shots(result, time_offset_seconds)
+    if not shot_list:
         return [], 0.0, ""
 
-    # ── 解析结构化 JSON ──
-    shot_data = parse_structured_json(qa_raw)
-    if not shot_data and director_raw:
-        # 回退：尝试从 Director 输出解析（如果 QA 输出不可解析）
-        shot_data = parse_structured_json(director_raw)
-
-    if not shot_data:
-        return [], 0.0, ""
-
-    # ── 代码组装：结构化 JSON → 4列分镜数据 ──
-    shot_list, total_seconds, global_atmosphere = assemble_seedance_prompt(
-        shot_data, time_offset_seconds
-    )
+    # ── 代码层兜底：强制满足体量下限，防止模型少拆导致总时长塌缩 ──
+    # 历史问题：Director 常把指南下限当软参考，5000 字剧本只产出约 2~10 分钟分镜。
+    # 此处若首轮镜头数 < 指南下限，则用更强指令重跑 Director 一次补足；仍不足则告警。
+    min_shots = _parse_min_shots(duration_guide)
+    if min_shots and len(shot_list) < min_shots:
+        logger.warning(
+            f"[run_crew_on_chunk] 首轮产出 {len(shot_list)} 镜 < 指南下限 {min_shots} 镜，触发补足重跑"
+        )
+        retry_guide = duration_guide + (
+            f"\n\n⚠️ 硬性补足指令：你上一轮仅产出 {len(shot_list)} 镜，但本块硬性下限为 "
+            f"{min_shots} 镜，严重不足。请立刻把剩余未拆的动作节拍、对白轮次、转场、情绪转折"
+            f"全部拆成新镜头，必须产出 ≥ {min_shots} 镜；宁可多拆，绝不要少于下限。"
+        )
+        r_shots, r_secs, r_atmo = _attempt_director_only(
+            director_llm, script_input, effective_style, char_injection, retry_guide, time_offset_seconds
+        )
+        if len(r_shots) > len(shot_list):
+            shot_list, total_seconds, global_atmosphere = r_shots, r_secs, (r_atmo or global_atmosphere)
+            logger.info(f"[run_crew_on_chunk] 补足重跑后镜头数 {len(shot_list)}（已采用）")
+        else:
+            logger.warning(
+                f"[run_crew_on_chunk] 补足重跑仍仅 {len(shot_list)} 镜（下限 {min_shots}），"
+                f"总时长可能低于参考值——请检查模型输出或下调 TARGET_CHARS_PER_SHOT"
+            )
 
     # ── 代码后验证 ──
     _validate_min_content(shot_list)
