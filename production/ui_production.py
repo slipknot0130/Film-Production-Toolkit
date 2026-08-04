@@ -33,6 +33,16 @@ from production.analysis_engine import (
     extract_characters,
 )
 from shared.llm_config import get_default_model, detect_script_format_by_volume
+from shared.script_preprocessor import (
+    SAFE_CAP as _SAFE_CAP,
+    TARGET_CHARS_PER_SHOT as _CHARS_PER_SHOT,
+    DEFAULT_AVG_SHOT_SEC as _AVG_SHOT_SEC,
+    compute_dynamic_safe_cap,
+    compute_adaptive_chunk_size,
+    compute_realistic_estimate,
+    plan_storyboard_chunks,
+    force_min_chunks,
+)
 
 
 # =============================================================================
@@ -1104,15 +1114,35 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
 
         st.markdown("---")
 
-        # 第二步：CrewAI 2-Agent 工作流（v3.0）
-        chunks = split_script_smart(script_content, max_chars=550)
-        st.success(f"第二步：启动 Seedance 2.0 结构参数化工作流，对 {len(chunks)} 个剧本切块进行分镜...")
+        # 第二步：CrewAI 2-Agent 工作流（v3.1 — 自适应切块 + 缺口补足）
+        # ── 动态 SAFE_CAP：根据模型输出上限自动调整单块镜数天花板 ──
+        _dynamic_cap = _SAFE_CAP  # 默认值，后续若能获取 max_tokens 可覆盖
+        try:
+            from production.crew_storyboard import resolve_output_cap, FALLBACK_MAX_OUTPUT
+            _model_name = st.session_state.get("selected_model", "")
+            _provider = st.session_state.llm_provider
+            _engine = st.session_state.get("engine_choice", "")
+            _output_cap = resolve_output_cap(_engine, _provider, _model_name) or FALLBACK_MAX_OUTPUT
+            _dynamic_cap = compute_dynamic_safe_cap(_output_cap)
+        except Exception:
+            pass
+
+        # ── v4 管线：①统计体量 → ②由体量算镜数 → ③模型容量反推切块数 → ④保证时长 ──
+        _target_duration_min = float(st.session_state.get("target_duration_min", 0.0) or 0.0)
+        _plan = plan_storyboard_chunks(
+            script_chars=len(script_content),
+            target_duration_min=_target_duration_min,
+            safe_cap=_dynamic_cap,
+            avg_shot_sec=_AVG_SHOT_SEC,
+        )
+        # 先按规划的块大小切，再用 force_min_chunks 保证块数达标（容量 ≥ 目标）
+        chunks = split_script_smart(script_content, max_chars=_plan["chunk_chars"])
+        chunks = force_min_chunks(chunks, _plan["num_chunks"], _plan["chunk_chars"])
+        st.success(f"第二步：启动 v4 分镜工作流，对 {len(chunks)} 个切块（≈{_plan['chunk_chars']} 字/块）进行分镜...（模型 {_provider}/{_model_name} 单块上限 {_dynamic_cap} 镜，由容量反推切块数）")
 
         # 目标时长：从侧边栏读取（分钟）。>0 时按各块字符占比分摊到每块，反推镜数密度
-        _target_duration_min = float(st.session_state.get("target_duration_min", 0.0) or 0.0)
         _total_script_chars = max(sum(len(c) for c in chunks), 1)
 
-        # 显示当前目标时长模式，避免用户误判为全局默认值或误以为是 bug
         _dur_display_map = {
             0.0: "自动（按剧本字数密度）",
             2.0: "短剧 · 2 分钟/集",
@@ -1120,34 +1150,23 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
             10.0: "标准 · 10 分钟/集",
             45.0: "长剧单集 · 45 分钟/集",
         }
-        # 密度常量统一从引擎侧导入，避免 UI 预估与实际产出口径漂移
-        from shared.script_preprocessor import (
-            SAFE_CAP as _SAFE_CAP,
-            TARGET_CHARS_PER_SHOT as _CHARS_PER_SHOT,
-            DEFAULT_AVG_SHOT_SEC as _AVG_SHOT_SEC,
-        )
 
         if _target_duration_min > 0:
             _mode_label = _dur_display_map.get(_target_duration_min, f"自定义 {_target_duration_min} 分钟/集")
-            _est_shots = max(int(_target_duration_min * 60.0 / _AVG_SHOT_SEC), 1)
-            st.info(f"🎯 当前分镜密度模式：{_mode_label}，预计总镜数约 {_est_shots} 镜（参考时长）")
+            st.info(
+                f"🎯 分镜模式：{_mode_label}｜目标 {_plan['demand_shots']} 镜 / {_target_duration_min:.0f} 分钟"
+                f"｜内容可支撑 {_plan['volume_shots']} 镜｜本模型单块上限 {_dynamic_cap} 镜×{len(chunks)} 块"
+                f"｜可达 {_plan['achievable_shots']} 镜 / {_plan['achievable_duration_sec']/60:.1f} 分钟"
+            )
         else:
-            _est_shots = max(int(_total_script_chars / _CHARS_PER_SHOT), 1)
-            _est_min = _est_shots * _AVG_SHOT_SEC / 60.0
-            st.info(f"🎯 当前分镜密度模式：自动（按剧本字数密度），预计总镜数约 {_est_shots} 镜（参考时长约 {_est_min:.0f} 分钟）")
+            st.info(
+                f"🎯 分镜模式：自动（按剧本体量）｜预计 {_plan['achievable_shots']} 镜 "
+                f"/ {_plan['achievable_duration_sec']/60:.1f} 分钟｜切块 {len(chunks)} 块"
+            )
 
-        # 前置可行性检查：剧本偏短 / 目标偏大时，单块 SAFE_CAP 护栏无法达成目标，提前警告
-        if _target_duration_min > 0:
-            _avg = _AVG_SHOT_SEC
-            _theoretical_shots = _target_duration_min * 60.0 / _avg
-            _max_safe_sec = len(chunks) * _SAFE_CAP * _avg
-            if _theoretical_shots > len(chunks) * _SAFE_CAP:
-                st.warning(
-                    f"⚠️ 目标 {_target_duration_min:.0f} 分钟约需 {int(_theoretical_shots)} 镜，"
-                    f"但当前剧本（{len(script_content)} 字）在单块安全上限下最多约 "
-                    f"{int(_max_safe_sec/60)} 分钟。建议：加长剧本，或调低目标时长；"
-                    f"否则将按上限封顶，实际时长低于目标。"
-                )
+        # ④ 可行性预警：内容不足以支撑目标时长时封顶并建议扩充剧本
+        if _plan["warning"]:
+            st.warning("⚠️ " + _plan["warning"])
 
         chars_str = json.dumps(global_chars, ensure_ascii=False) if global_chars else ""
         global_shots = []
@@ -1159,10 +1178,10 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
             for i, chunk in enumerate(chunks):
                 status_placeholder = st.empty()
                 status_placeholder.info(f"  正在处理第 {i+1}/{len(chunks)} 个切块（时间码从 {int(accumulated_seconds//60):02d}:{int(accumulated_seconds%60):02d} 开始）...")
-                # 按字符占比分摊目标时长到本块（目标模式）
+                # 按字符占比分摊「可达时长」到本块（v4：封顶到内容可支撑范围，避免虚高）
                 _chunk_target_sec = 0.0
                 if _target_duration_min > 0:
-                    _chunk_target_sec = (_target_duration_min * 60.0) * (len(chunk) / _total_script_chars)
+                    _chunk_target_sec = _plan["achievable_duration_sec"] * (len(chunk) / _total_script_chars)
                 try:
                     shots, total_secs, atmosphere = run_crew_on_chunk(
                         chunk, chars_str, style_tokens_input,
@@ -1186,6 +1205,72 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
                 except Exception as crew_err:
                     st.warning(f"⚠️ 第 {i+1} 块处理异常：{crew_err}")
                 status_placeholder.info(f"  第 {i+1}/{len(chunks)} 块完成 ✓")
+
+        # ── v4 缺口补足重跑：产出不足「可达目标」时自动拆分重跑（封顶到内容可支撑范围）──
+        if _target_duration_min > 0 and global_shots:
+            _target_sec = _plan["achievable_duration_sec"]
+            _gap_sec = _target_sec - accumulated_seconds
+            _gap_shots = int(_target_sec / _AVG_SHOT_SEC) - len(global_shots)
+            # 缺口超过目标的 30% 时触发补足
+            if _gap_sec > _target_sec * 0.3 and len(global_shots) > 0:
+                st.warning(
+                    f"🔄 检测到分镜缺口：目标 {_target_duration_min:.0f} 分钟，"
+                    f"当前仅产出 {len(global_shots)} 镜 / {accumulated_seconds:.0f} 秒。"
+                    f"正在启动缺口补足（拆分重跑低产切块）..."
+                )
+                # 找出产出镜头数明显低于本块预期的切块（可能是被 SAFE_CAP 截断的）
+                _chunk_outputs = []  # (chunk_index, shots_count, chunk_text)
+                # 需要在循环中记录每块产出——用近似估算回溯：
+                # 低产切块特征：该块字符占比 × 总镜数 应 > 实际产出
+                _avg_per_char = len(global_shots) / max(_total_script_chars, 1)
+                _reshoot_chunks = []
+                for _ci, _ck in enumerate(chunks):
+                    _expected_for_chunk = _avg_per_char * len(_ck) * 1.5  # 预期×1.5作为阈值
+                    if _expected_for_chunk > _dynamic_cap * 0.8:
+                        # 这个切块可能被截断了，加入重跑列表
+                        _reshoot_chunks.append(_ci)
+
+                if _reshoot_chunks:
+                    # 将低产切块进一步拆分为更小的子块
+                    _sub_chunks = []
+                    for _ci in _reshoot_chunks:
+                        _sub = split_script_smart(chunks[_ci], max_chars=max(_plan["chunk_chars"] // 2, 150))
+                        _sub_chunks.extend(_sub)
+
+                    if _sub_chunks:
+                        st.info(f"  拆分 {len(_reshoot_chunks)} 个低产切块为 {len(_sub_chunks)} 个子块，重新生成...")
+                        _sub_shot_num = shot_num
+                        for _si, _sc in enumerate(_sub_chunks):
+                            _sp = st.empty()
+                            _sp.info(f"  补足：处理子块 {_si+1}/{len(_sub_chunks)}...")
+                            try:
+                                _sub_target = (_gap_sec) * (len(_sc) / max(sum(len(s) for s in _sub_chunks), 1))
+                                _s_shots, _s_secs, _s_atm = run_crew_on_chunk(
+                                    _sc, chars_str, style_tokens_input,
+                                    st.session_state.llm_provider,
+                                    st.session_state.base_url,
+                                    st.session_state.api_key or "sk-local",
+                                    model_name,
+                                    time_offset_seconds=accumulated_seconds,
+                                    target_duration_sec=max(_sub_target, 10.0)  # 至少给10秒
+                                )
+                                for _s in _s_shots:
+                                    if isinstance(_s, dict):
+                                        _s["镜头号"] = shot_num
+                                        global_shots.append(_s)
+                                        shot_num += 1
+                                if _s_secs > 0:
+                                    accumulated_seconds += _s_secs
+                            except Exception as _sub_err:
+                                st.warning(f"  补足子块 {_si+1} 异常：{_sub_err}")
+                            _sp.info(f"  补足子块 {_si+1}/{len(_sub_chunks)} 完成 ✓")
+
+                        _total_min2 = int(accumulated_seconds // 60)
+                        _total_sec2 = int(accumulated_seconds % 60)
+                        st.success(
+                            f"✅ 补足完成！总计 {len(global_shots)} 镜 / "
+                            f"{_total_min2} 分 {_total_sec2} 秒"
+                        )
 
         # 第三步：展示全局氛围画质 + Seedance 2.0 分镜矩阵
         if global_shots:

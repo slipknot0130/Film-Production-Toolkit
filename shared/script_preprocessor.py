@@ -17,6 +17,7 @@ shared/script_preprocessor.py — 剧本代码层预处理器
 """
 
 import re
+import math
 from dataclasses import dataclass, field
 from collections import Counter
 from typing import List, Dict, Optional
@@ -455,12 +456,202 @@ def count_internal_external_scenes(script_text: str) -> tuple:
 # 里（写死的魔法数字 24 / 5.0 / 28），改一处忘一处，导致 UI 预估值和引擎实际
 # 产出长期对不上。现统一提升为模块级常量，所有调用方一律从这里导入。
 
-SAFE_CAP = 28              # 单次 LLM 调用安全镜数上限（防 8K token 输出被截断）
+SAFE_CAP = 28              # 单次 LLM 调用安全镜数上限（防 8K token 输出被截断）——默认值，可被动态覆盖
 TARGET_CHARS_PER_SHOT = 20  # 默认密度：12000字≈45分钟(4.5s/镜) → 5000字≈18.75分钟
 DEFAULT_AVG_SHOT_SEC = 4.5  # 默认平均镜长（秒），与 UI 预估口径保持一致
 
+# ── 动态 SAFE_CAP 计算 ──
+# 每镜头 JSON 输出（画面内容≥80字 + felt_intent + 景别/机位/构图/运镜/出场角色等多字段 +
+#   JSON 结构键名开销）实测约 130~180 token；此处取 400 作保守估计，
+# 确保单块请求量稳稳落在模型输出上限内，杜绝「要求 26 镜→11K token→撞 8192 被截断」。
+# 安全容量 = max_tokens / 400（DeepSeek 8192 → 20 镜/块；16K → 40；32K → 81）
+_TOKENS_PER_SHOT = 400  # 每镜头平均消耗 token 数（含 JSON 结构开销，保守值）
 
-def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) -> str:
+def compute_dynamic_safe_cap(max_tokens: int = 8192) -> int:
+    """
+    根据模型实际输出 token 上限，动态计算单块安全镜数（动态值即权威，不再被 SAFE_CAP 地板抬升）。
+    - 8K token (DeepSeek-V4-Flash) → 20 镜/块
+    - 16K token → 40 镜/块
+    - 32K token → 81 镜/块
+    - 未知/本地模型(max_tokens<=0) → 返回 8 作为极保守下限
+    """
+    if max_tokens <= 0:
+        return 8  # 极保守默认（未知容量时宁多切块）
+    return max(8, int(max_tokens / _TOKENS_PER_SHOT))
+
+
+def compute_adaptive_chunk_size(
+    script_chars: int,
+    target_duration_sec: float = 0.0,
+    safe_cap: int = SAFE_CAP,
+    avg_shot_sec: float = DEFAULT_AVG_SHOT_SEC,
+    min_chunk_chars: int = 150,
+    max_chunk_chars: int = 550,
+) -> int:
+    """
+    根据目标时长和剧本长度，自适应计算切块大小。
+
+    核心逻辑：当目标镜数远超当前切块数×safe_cap 时，
+    自动缩小切块尺寸以增加切块数量，从而提升总产出上限。
+
+    参数：
+        script_chars: 剧本总字符数
+        target_duration_sec: 目标时长（秒），<=0 表示自动模式
+        safe_cap: 单块安全镜数上限
+        avg_shot_sec: 平均每镜秒数
+        min_chunk_chars: 切块最小字符数（防止碎片化）
+        max_chunk_chars: 切块最大字符数（原始默认值）
+
+    返回：
+        推荐的 max_chars 值（传给 split_script_smart）
+    """
+    if target_duration_sec <= 0:
+        return max_chunk_chars  # 自动模式，用默认大切块
+
+    target_shots = target_duration_sec / avg_shot_sec
+    min_chunks_needed = math.ceil(target_shots / safe_cap)
+
+    # 用默认切块大小能切出多少块
+    default_chunks = max(1, math.ceil(script_chars / max_chunk_chars))
+
+    if default_chunks >= min_chunks_needed:
+        return max_chunk_chars  # 够了，不需要缩小
+
+    # 不够 → 缩小切块以增加块数
+    # 目标：至少切出 min_chunks_needed 块
+    adaptive_size = max(min_chunk_chars, int(script_chars / (min_chunks_needed * 1.2)))
+    return adaptive_size
+
+
+def compute_realistic_estimate(
+    script_chars: int,
+    target_duration_min: float = 0.0,
+    num_chunks: int = 1,
+    safe_cap: int = SAFE_CAP,
+) -> tuple:
+    """
+    计算真实的可达镜数和时长估计（考虑 SAFE_CAP 和切块数限制）。
+
+    返回：(est_shots, est_seconds, is_capped, theoretical_shots)
+        est_shots: 实际可达预估镜数（min(理论, 天花板)）
+        est_seconds: 对应秒数
+        is_capped: 是否被 SAFE_CAP 截断
+        theoretical_shots: 理论目标镜数（不考虑截断）
+    """
+    avg = DEFAULT_AVG_SHOT_SEC
+    if target_duration_min > 0:
+        theoretical_shots = target_duration_min * 60.0 / avg
+    else:
+        theoretical_shots = max(script_chars / TARGET_CHARS_PER_SHOT, 1)
+
+    ceiling = num_chunks * safe_cap
+    is_capped = theoretical_shots > ceiling
+    est_shots = min(int(theoretical_shots), ceiling)
+    est_seconds = est_shots * avg
+    return int(est_shots), est_seconds, is_capped, int(theoretical_shots)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v4 分镜规划管线（用户指定：体量 → 镜数 → 模型容量反推切块数 → 保证时长）
+# ─────────────────────────────────────────────────────────────────────────────
+def plan_storyboard_chunks(
+    script_chars: int,
+    target_duration_min: float = 0.0,
+    safe_cap: int = SAFE_CAP,
+    avg_shot_sec: float = DEFAULT_AVG_SHOT_SEC,
+    chars_per_shot: float = TARGET_CHARS_PER_SHOT,
+    min_chunk_chars: int = 120,
+) -> dict:
+    """
+    分镜切块规划（v4 管线）：
+      ① 统计剧本体量 → script_chars
+      ② 根据体量生成大概分镜头数（内容可支撑上限）→ volume_shots = script_chars // chars_per_shot
+      ③ 利用模型容量计算切分数量 → num_chunks = ceil(achievable_shots / safe_cap)
+      ④ 保证镜头总时长足够（内容不足时封顶并给出预警，绝不虚报）
+
+    参数：
+      script_chars: 剧本总字符数（调用方决定传全文字数还是屏幕内容字数）
+      target_duration_min: 用户目标时长（分钟），<=0 表示自动模式（仅由体量决定）
+      safe_cap: 单块安全镜数上限（由模型 max_tokens 推算，如 DeepSeek 8192→29）
+      avg_shot_sec: 平均每镜秒数
+      chars_per_shot: 密度（字/镜）
+      min_chunk_chars: 切块最小字符数（防止碎片化）
+
+    返回 dict：
+      volume_shots / demand_shots / achievable_shots / feasible /
+      num_chunks / chunk_chars / per_chunk_target_shots /
+      achievable_duration_sec / demand_duration_sec / safe_cap / warning
+    """
+    volume_shots = max(int(script_chars / chars_per_shot), 1)
+    if target_duration_min > 0:
+        demand_shots = max(int(target_duration_min * 60.0 / avg_shot_sec), 1)
+        demand_duration_sec = target_duration_min * 60.0
+    else:
+        demand_shots = volume_shots
+        demand_duration_sec = volume_shots * avg_shot_sec
+
+    # ④ 内容不足以支撑用户目标时封顶，优先保证"产出可达"，不虚报
+    feasible = demand_shots <= volume_shots
+    achievable_shots = min(demand_shots, volume_shots)
+
+    # ③ 切块数由模型单块上限反推（核心：不再是写死 550 字）
+    num_chunks = max(1, math.ceil(achievable_shots / safe_cap))
+    chunk_chars = max(min_chunk_chars, int(script_chars / num_chunks))
+    per_chunk_target_shots = achievable_shots / num_chunks
+    achievable_duration_sec = achievable_shots * avg_shot_sec
+
+    warning = ""
+    if not feasible:
+        need_chars = int(demand_shots * chars_per_shot)
+        warning = (
+            f"剧本体量（{script_chars} 字）最多支撑约 {volume_shots} 镜 "
+            f"（≈ {volume_shots * avg_shot_sec / 60:.1f} 分钟），"
+            f"低于您设定的 {target_duration_min:.0f} 分钟目标（≈ {demand_shots} 镜）。\n"
+            f"已自动将目标封顶为内容可支撑的 {volume_shots} 镜；"
+            f"要达成 {target_duration_min:.0f} 分钟需将剧本扩充至约 {need_chars} 字以上。"
+        )
+
+    return {
+        "volume_shots": volume_shots,
+        "demand_shots": demand_shots,
+        "achievable_shots": achievable_shots,
+        "feasible": feasible,
+        "num_chunks": num_chunks,
+        "chunk_chars": chunk_chars,
+        "per_chunk_target_shots": per_chunk_target_shots,
+        "achievable_duration_sec": achievable_duration_sec,
+        "demand_duration_sec": demand_duration_sec,
+        "safe_cap": safe_cap,
+        "warning": warning,
+    }
+
+
+def force_min_chunks(chunks: list, min_count: int, max_chars: int) -> list:
+    """
+    若切块数不足 min_count，递归拆分最大的块（在换行处断开），
+    保证切块数 ≥ min_count，从而单块上限 × 块数 的容量足以覆盖目标镜数。
+    避免「块数太少 → 天花板低于目标」的老问题。
+    """
+    result = list(chunks)
+    guard = 0
+    while len(result) < min_count and guard < 200:
+        guard += 1
+        largest_idx = max(range(len(result)), key=lambda i: len(result[i]))
+        if len(result[largest_idx]) <= max_chars:
+            break  # 已无法再分（块本身就不大），停止避免碎片化
+        big = result.pop(largest_idx)
+        mid = len(big) // 2
+        nl = big.find("\n", mid)
+        if nl == -1:
+            nl = big.rfind("\n", 0, mid)
+        if nl == -1:
+            nl = mid  # 没有换行，硬切
+        result.append(big[:nl])
+        result.append(big[nl:])
+    return result
+
+
+def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0, safe_cap_override: int = None) -> str:
     """
     v2.3：代码层分析剧本体量，生成分镜时长/镜数推荐。
     纯算法计算 — 字数统计、对白密度、场景数量 — 不做任何语义判断。
@@ -472,6 +663,9 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         作为硬性下限要求（不再软参考）。
       - target_duration_sec >  0：按目标时长反推镜数（镜数 = 目标秒 ÷ 平均镜秒），
         作为硬性目标——分块模式下各块按字符占比分摊目标时长，单块目标受 SAFE_CAP 护栏兜底。
+
+    v3.1 新增：safe_cap_override 允许调用方传入动态计算的 SAFE_CAP（基于模型输出 token 上限），
+      覆盖模块默认值 28。当模型支持 16K/32K 输出时自动提升单块上限。
 
     核心公式（v2.5 — 对齐用户成片密度模型）：
       默认密度：约 1 镜 / TARGET_CHARS_PER_SHOT 字（对应 12000 字剧本≈45 分钟成片）
@@ -488,6 +682,9 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
     stripped = script_text.strip()
     if not stripped:
         return ""
+
+    # ── v3.1：解析有效 SAFE_CAP（支持动态覆盖）──
+    _eff_safe_cap = safe_cap_override if safe_cap_override is not None else SAFE_CAP
 
     total_chars = len(stripped)
     effective_chars = len(re.sub(r'\s+', '', stripped))
@@ -567,7 +764,7 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         # 硬性目标：下限=目标×0.9，上限=目标×1.1，但单调用不超过 SAFE_CAP 护栏
         min_shots = max(int(target_shots * 0.9), scene_count * 2, 3)
         max_shots = max(int(target_shots * 1.1), min_shots)  # 上限不得低于下限
-        max_shots = min(max_shots, SAFE_CAP)  # token 安全护栏
+        max_shots = min(max_shots, _eff_safe_cap)  # token 安全护栏（v3.1：支持动态值）
         min_shots = min(min_shots, max_shots)  # 下限不得高于上限
         estimated_duration = target_duration_sec
         min_duration = int(target_duration_sec * 0.9)
@@ -576,7 +773,7 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         effective_density = (
             screen_content_chars / target_shots if target_shots else TARGET_CHARS_PER_SHOT
         )
-        capped = (int(target_shots * 1.1) > SAFE_CAP)
+        capped = (int(target_shots * 1.1) > _eff_safe_cap)
     else:
         # 默认密度模型（对齐 12000字≈45分钟 成片）——常量见模块顶部
         estimated_shots = max(
@@ -587,7 +784,7 @@ def generate_duration_guide(script_text: str, target_duration_sec: float = 0.0) 
         # 硬性下限要求（不再软参考）：下限=估算×0.85，上限=估算×1.25，受 SAFE_CAP 护栏
         min_shots = max(int(estimated_shots * 0.85), scene_count * 2, 3)
         max_shots = max(int(estimated_shots * 1.25), min_shots)  # 上限不得低于下限
-        max_shots = min(max_shots, SAFE_CAP)
+        max_shots = min(max_shots, _eff_safe_cap)  # v3.1：支持动态值
         min_shots = min(min_shots, max_shots)  # 下限不得高于上限
         estimated_duration = estimated_shots * avg_shot_sec
         min_duration = int(estimated_duration * 0.8)

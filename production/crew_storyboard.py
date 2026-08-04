@@ -1295,10 +1295,94 @@ def create_crew_qa_only(agents: dict, tasks: dict) -> Crew:
 # JSON 解析 — v4.0（适配新 Schema）
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _salvage_truncated_storyboard(text: str) -> dict:
+    """
+    v4.8 截断抢救：当 LLM 输出因撞上模型输出 token 上限而被截断（JSON 在
+    「分镜列表」数组中途断裂）时，用括号配平回收所有【已完整产出】的镜头对象，
+    绝不因一处截断整块归零。
+
+    返回 dict（含 分镜列表 + 尽力提取的 全局氛围画质/场景定义），无完整镜头则返回 None。
+    """
+    import json as _json
+    # 必须存在 分镜列表 数组起点
+    m = re.search(r'"分镜列表"\s*:\s*\[', text)
+    if not m:
+        return None
+    arr_start = m.end() - 1  # '[' 的位置
+
+    depth = 0
+    in_str = False
+    esc = False
+    obj_start = None
+    shots = []
+    i = arr_start
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if esc:
+            esc = False
+            i += 1
+            continue
+        if c == '\\' and in_str:
+            esc = True
+            i += 1
+            continue
+        if c == '"':
+            in_str = not in_str
+            i += 1
+            continue
+        if in_str:
+            i += 1
+            continue
+        if c == '{':
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                try:
+                    shots.append(_json.loads(text[obj_start:i + 1]))
+                except _json.JSONDecodeError:
+                    pass
+                obj_start = None
+        elif c == ']' and depth == 0:
+            break  # 数组正常结束
+        i += 1
+
+    if not shots:
+        return None
+
+    data = {"分镜列表": shots}
+    # 尽力提取全局氛围画质（单值字符串）
+    try:
+        aura_m = re.search(r'"全局氛围画质"\s*:\s*("(?:[^"\\]|\\.)*")', text)
+        if aura_m:
+            data["全局氛围画质"] = _json.loads(aura_m.group(1))
+    except Exception:
+        pass
+    # 尽力提取导演声音
+    try:
+        dv_m = re.search(r'"director_voice"\s*:\s*("(?:[^"\\]|\\.)*")', text)
+        if dv_m:
+            data["director_voice"] = _json.loads(dv_m.group(1))
+    except Exception:
+        pass
+    # 尽力提取场景定义对象（首层）
+    try:
+        sd_m = re.search(r'"场景定义"\s*:\s*\{.*?\}\s*[,}]', text, re.DOTALL)
+        if sd_m:
+            data["场景定义"] = _json.loads("{" + sd_m.group(0)[len('"场景定义":'):].rstrip().rstrip(',') + "}")
+    except Exception:
+        pass
+    return data
+
+
 def parse_structured_json(raw_text: str) -> dict:
     """
     v4.0：从 LLM 输出中提取结构化分镜 JSON（全局氛围画质 + 场景定义 + 分镜列表）。
     返回 dict 或 None。
+    v4.8：新增第 4 路——截断抢救（见 _salvage_truncated_storyboard）。
     """
     import json as _json
     
@@ -1335,6 +1419,11 @@ def parse_structured_json(raw_text: str) -> dict:
                 return data
         except _json.JSONDecodeError:
             pass
+    
+    # 尝试4（v4.8）：截断抢救——JSON 在 分镜列表 中途断裂时回收已完整产出的镜头
+    salvaged = _salvage_truncated_storyboard(text)
+    if salvaged and salvaged.get("分镜列表"):
+        return salvaged
     
     return None
 
@@ -1470,6 +1559,7 @@ def run_crew_on_chunk(
     fallback_provider: str = "",
     fallback_timeout: int = 600,
     target_duration_sec: float = 0.0,
+    _depth: int = 0,
 ) -> tuple:
     """
     v3.0: 对单个剧本切块运行 2-Agent 工作流（Director → QA），
@@ -1523,9 +1613,15 @@ def run_crew_on_chunk(
     # ── 代码预计算：体量分析 ──
     duration_guide = ""
     try:
-        from shared.script_preprocessor import generate_duration_guide
+        from shared.script_preprocessor import generate_duration_guide, compute_dynamic_safe_cap
+        # v3.1：基于实际 max_tokens 计算动态 SAFE_CAP，传给密度指南
+        _actual_max_tokens = clamp_max_tokens(max_tokens, engine_choice, provider, model_name) or FALLBACK_MAX_OUTPUT
+        _dyn_safe_cap = compute_dynamic_safe_cap(_actual_max_tokens)
         # 基于 chunk 文本本身计算密度（不含角色前缀/时间提示，避免污染字符统计）
-        duration_guide = generate_duration_guide(chunk, target_duration_sec=target_duration_sec)
+        duration_guide = generate_duration_guide(
+            chunk, target_duration_sec=target_duration_sec,
+            safe_cap_override=_dyn_safe_cap
+        )
     except Exception:
         pass
     
@@ -1624,30 +1720,78 @@ def run_crew_on_chunk(
 
     # ── 代码层兜底：强制满足体量下限，防止模型少拆导致总时长塌缩 ──
     # 历史问题：Director 常把指南下限当软参考，5000 字剧本只产出约 2~10 分钟分镜。
-    # 此处若首轮镜头数 < 指南下限，则用更强指令重跑 Director 一次补足；仍不足则告警。
+    # v4.8 改为「细分切块补足」优先：欠产块对半拆分、各跑一次、合并镜头数，
+    # 从结构上逼出更多镜头（比「同一块重发」更可靠，因为重发常同样欠产）。
     min_shots = _parse_min_shots(duration_guide)
     if min_shots and len(shot_list) < min_shots:
         logger.warning(
-            f"[run_crew_on_chunk] 首轮产出 {len(shot_list)} 镜 < 指南下限 {min_shots} 镜，触发补足重跑"
+            f"[run_crew_on_chunk] 首轮产出 {len(shot_list)} 镜 < 指南下限 {min_shots} 镜，触发补足"
         )
-        retry_guide = duration_guide + (
-            f"\n\n⚠️ 硬性补足指令：你上一轮仅产出 {len(shot_list)} 镜，但本块硬性下限为 "
-            f"{min_shots} 镜，严重不足。请立刻把剩余未拆的动作节拍、对白轮次、转场、情绪转折"
-            f"全部拆成新镜头，必须产出 ≥ {min_shots} 镜；宁可多拆，绝不要少于下限。"
-        )
-        # 用 winning_llm 而非 director_llm：若首轮是靠降级模型跑通的，
-        # 这里再用（已经超时/不可用的）主模型重跑，只会白等一个 timeout。
-        r_shots, r_secs, r_atmo = _attempt_director_only(
-            winning_llm, script_input, effective_style, char_injection, retry_guide, time_offset_seconds
-        )
-        if len(r_shots) > len(shot_list):
-            shot_list, total_seconds, global_atmosphere = r_shots, r_secs, (r_atmo or global_atmosphere)
-            logger.info(f"[run_crew_on_chunk] 补足重跑后镜头数 {len(shot_list)}（已采用）")
-        else:
-            logger.warning(
-                f"[run_crew_on_chunk] 补足重跑仍仅 {len(shot_list)} 镜（下限 {min_shots}），"
-                f"总时长可能低于参考值——请检查模型输出或下调 TARGET_CHARS_PER_SHOT"
+        subdivided = False
+        # 细分切块（深度 ≤ 2，块足够大才拆，避免无限细分）
+        if _depth < 2 and len(chunk) >= 240:
+            mid = len(chunk) // 2
+            nl = chunk.find("\n", mid)
+            if nl == -1:
+                nl = chunk.rfind("\n", 0, mid)
+            if nl == -1:
+                nl = mid
+            half_a, half_b = chunk[:nl], chunk[nl:]
+            if len(half_a) >= 60 and len(half_b) >= 60:
+                half_target = (target_duration_sec / 2.0) if target_duration_sec > 0 else 0.0
+                a_shots, a_sec, a_atmo = run_crew_on_chunk(
+                    half_a, global_chars, style_tokens, engine_choice, api_base, api_key,
+                    model_name, time_offset_seconds=time_offset_seconds, provider=provider,
+                    timeout=timeout, qa_api_base=qa_api_base, qa_api_key=qa_api_key,
+                    qa_model_name=qa_model_name, qa_provider=qa_provider, qa_timeout=qa_timeout,
+                    max_tokens=max_tokens, fallback_api_base=fallback_api_base,
+                    fallback_api_key=fallback_api_key, fallback_model_name=fallback_model_name,
+                    fallback_provider=fallback_provider, fallback_timeout=fallback_timeout,
+                    target_duration_sec=half_target, _depth=_depth + 1,
+                )
+                b_shots, b_sec, b_atmo = run_crew_on_chunk(
+                    half_b, global_chars, style_tokens, engine_choice, api_base, api_key,
+                    model_name, time_offset_seconds=time_offset_seconds + a_sec, provider=provider,
+                    timeout=timeout, qa_api_base=qa_api_base, qa_api_key=qa_api_key,
+                    qa_model_name=qa_model_name, qa_provider=qa_provider, qa_timeout=qa_timeout,
+                    max_tokens=max_tokens, fallback_api_base=fallback_api_base,
+                    fallback_api_key=fallback_api_key, fallback_model_name=fallback_model_name,
+                    fallback_provider=fallback_provider, fallback_timeout=fallback_timeout,
+                    target_duration_sec=half_target, _depth=_depth + 1,
+                )
+                merged = list(a_shots) + list(b_shots)
+                if merged:
+                    for _i, _s in enumerate(merged, 1):
+                        if isinstance(_s, dict):
+                            _s["镜头号"] = _i
+                    if len(merged) > len(shot_list):
+                        shot_list = merged
+                        total_seconds = a_sec + b_sec
+                        global_atmosphere = a_atmo or global_atmosphere
+                        subdivided = True
+                        logger.info(
+                            f"[run_crew_on_chunk] 细分补足后 {len(shot_list)} 镜（depth={_depth}）"
+                        )
+        # 细分未生效（块太小/已达深度上限）时，退回「更强指令重跑」
+        if not subdivided and _depth == 0:
+            retry_guide = duration_guide + (
+                f"\n\n⚠️ 硬性补足指令：你上一轮仅产出 {len(shot_list)} 镜，但本块硬性下限为 "
+                f"{min_shots} 镜，严重不足。请立刻把剩余未拆的动作节拍、对白轮次、转场、情绪转折"
+                f"全部拆成新镜头，必须产出 ≥ {min_shots} 镜；宁可多拆，绝不要少于下限。"
             )
+            # 用 winning_llm 而非 director_llm：若首轮是靠降级模型跑通的，
+            # 这里再用（已经超时/不可用的）主模型重跑，只会白等一个 timeout。
+            r_shots, r_secs, r_atmo = _attempt_director_only(
+                winning_llm, script_input, effective_style, char_injection, retry_guide, time_offset_seconds
+            )
+            if len(r_shots) > len(shot_list):
+                shot_list, total_seconds, global_atmosphere = r_shots, r_secs, (r_atmo or global_atmosphere)
+                logger.info(f"[run_crew_on_chunk] 补足重跑后镜头数 {len(shot_list)}（已采用）")
+            else:
+                logger.warning(
+                    f"[run_crew_on_chunk] 补足重跑仍仅 {len(shot_list)} 镜（下限 {min_shots}），"
+                    f"总时长可能低于参考值——请检查模型输出或下调 TARGET_CHARS_PER_SHOT"
+                )
 
     # ── 代码后验证 ──
     _validate_min_content(shot_list)
