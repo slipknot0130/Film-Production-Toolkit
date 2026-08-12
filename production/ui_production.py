@@ -31,6 +31,7 @@ from production.analysis_engine import (
     run_pro_budget_scene,
     extract_scenes,
     extract_characters,
+    extract_scene_visual_prompts,
 )
 from shared.llm_config import get_default_model, detect_script_format_by_volume
 from shared.script_preprocessor import (
@@ -1095,7 +1096,108 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
 
     st.success(f"✅ 已加载剧本，共 {len(script_content)} 字符")
 
-    if st.button("🚀 启动 Seedance 2.0 分镜工作流（4-Agent串行）", type="primary", use_container_width=True):
+    def _render_storyboard_results(global_chars, global_scenes, global_shots, global_atmosphere, accumulated_seconds):
+        """渲染分镜工作台的全部结果（人物/场景/分镜/下载），支持 rerun 后从缓存恢复。"""
+        # ── 人物档案 ──
+        if global_chars:
+            st.markdown(f"### 👤 全局角色视觉档案库 (共提取 {len(global_chars)} 名角色)")
+            for char in global_chars:
+                st.markdown(f"- **{char.get('name', '未知')}**：{char.get('bio', '')}\n  *Prompt*: `{char.get('visual_prompt', '')}`")
+            st.markdown("---")
+
+        # ── 场景资产 ──
+        if global_scenes:
+            st.markdown(f"### 🏞️ 全局场景资产库 (共提取 {len(global_scenes)} 个场景)")
+            for scene in global_scenes:
+                vp = scene.get("visual_prompt", "")
+                elements = "、".join(scene.get("关键视觉元素", [])) or "无"
+                st.markdown(
+                    f"- **{scene.get('场景名称', '未知')}**（{scene.get('内外景', '')}｜{scene.get('日夜', '')}）\n"
+                    f"  *光线氛围*：{scene.get('光线氛围', '')}｜*色调*：{scene.get('色调', '')}\n"
+                    f"  *关键元素*：{elements}\n"
+                    f"  *Prompt*: `{vp}`"
+                )
+            st.markdown("---")
+
+        # ── 分镜矩阵 ──
+        if not global_shots:
+            st.warning("⚠️ CrewAI 工作流未返回有效分镜数据")
+            return
+
+        total_min = int(accumulated_seconds // 60)
+        total_sec = int(accumulated_seconds % 60)
+
+        # v3.0：展示全局氛围画质
+        if global_atmosphere:
+            st.markdown("### 🎨 全局氛围与画质设定")
+            with st.expander("展开查看完整【氛围与画质】", expanded=False):
+                st.text_area(
+                    "【氛围与画质】", global_atmosphere,
+                    height=200, key="global_atmosphere_display",
+                    label_visibility="collapsed"
+                )
+                st.caption("📋 以上为 LLM 根据剧本自动生成的全局视觉设定，可直接复制使用。")
+
+        st.markdown(f"### 🎥 Seedance 2.0 分镜矩阵（总计 {len(global_shots)} 镜 / 累计时长 {total_min} 分 {total_sec} 秒）")
+        st.caption("📌 每镜一行「终极Seedance提示词」—— 直接复制粘贴到 Seedance 2.0 即可使用")
+
+        cols_order = ["镜头号"] + [c for c in global_shots[0].keys() if c != "镜头号"]
+        df_shots = pd.DataFrame(global_shots)[cols_order]
+
+        # v3.0：代码组装保证输出4列，此处仅做兜底确保
+        for required_col in ["时间码", "景别机位运镜", "终极Seedance提示词"]:
+            if required_col not in df_shots.columns:
+                df_shots[required_col] = ""
+
+        display_cols = ["镜头号", "时间码", "景别机位运镜", "终极Seedance提示词"]
+        df_display = df_shots[[c for c in display_cols if c in df_shots.columns]]
+
+        st.data_editor(
+            df_display,
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "镜头号": st.column_config.NumberColumn(width="small", format="%d"),
+                "时间码": st.column_config.TextColumn(width="small"),
+                "景别机位运镜": st.column_config.TextColumn(width="medium"),
+                "终极Seedance提示词": st.column_config.TextColumn(width="large"),
+            }
+        )
+
+        # Excel下载 — v3.1 格式：分镜 + 场景资产 + 人物资产
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            df_display.to_excel(writer, index=False, sheet_name="Seedance2.0分镜")
+
+            if global_scenes:
+                scene_cols = ["场次", "场景名称", "内外景", "日夜", "出场人物",
+                              "visual_prompt", "关键视觉元素", "光线氛围", "色调"]
+                df_scenes = pd.DataFrame(global_scenes)
+                scene_cols = [c for c in scene_cols if c in df_scenes.columns]
+                df_scenes[scene_cols].to_excel(writer, index=False, sheet_name="场景资产")
+
+            if global_chars:
+                char_cols = ["name", "bio", "visual_prompt"]
+                df_chars = pd.DataFrame(global_chars)
+                char_cols = [c for c in char_cols if c in df_chars.columns]
+                # 中文表头更友好
+                df_chars = df_chars[char_cols].rename(columns={
+                    "name": "角色名",
+                    "bio": "人物小传",
+                    "visual_prompt": "生图提示词",
+                })
+                df_chars.to_excel(writer, index=False, sheet_name="人物资产")
+
+        st.download_button(
+            "📥 下载 Seedance 分镜矩阵 (Excel)", data=out.getvalue(),
+            file_name="分镜矩阵_Seedance2.0.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # 点击启动：提取人物/场景 → 生成分镜 → 缓存到 session_state
+    # ─────────────────────────────────────────────────────────────────────────
+    if st.button("🚀 启动 Seedance 2.0 分镜工作流（4-Agent串行）", type="primary", use_container_width=True, key="btn_run_storyboard"):
         provider, client, model_name, kwargs = _get_production_llm()
 
         if "Ollama" in provider:
@@ -1108,11 +1210,10 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
         with st.spinner("👤 视觉导演就位：正在全篇提取人物小传与视觉档案库..."):
             global_chars = extract_characters(script_content, client, model_name, kwargs)
 
-        st.markdown(f"### 👤 全局角色视觉档案库 (共提取 {len(global_chars)} 名角色)")
-        for char in global_chars:
-            st.markdown(f"- **{char.get('name', '未知')}**：{char.get('bio', '')}\n  *Prompt*: `{char.get('visual_prompt', '')}`")
-
-        st.markdown("---")
+        # 第一步B：提取场景并生成场景固定资产提示词
+        with st.spinner("🏞️ 美术指导就位：正在提取场景并生成场景资产提示词..."):
+            raw_scenes = extract_scenes(script_content, client, model_name, kwargs)
+            global_scenes = extract_scene_visual_prompts(raw_scenes, script_content, client, model_name, kwargs)
 
         # 第二步：CrewAI 2-Agent 工作流（v3.1 — 自适应切块 + 缺口补足）
         # ── 动态 SAFE_CAP：根据模型输出上限自动调整单块镜数天花板 ──
@@ -1272,55 +1373,21 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
                             f"{_total_min2} 分 {_total_sec2} 秒"
                         )
 
-        # 第三步：展示全局氛围画质 + Seedance 2.0 分镜矩阵
-        if global_shots:
-            total_min = int(accumulated_seconds // 60)
-            total_sec = int(accumulated_seconds % 60)
+        # 第三步：缓存结果并渲染
+        st.session_state.storyboard_chars = global_chars
+        st.session_state.storyboard_scenes = global_scenes
+        st.session_state.storyboard_shots = global_shots
+        st.session_state.storyboard_atmosphere = global_atmosphere
+        st.session_state.storyboard_seconds = accumulated_seconds
+        st.session_state.storyboard_script_hash = hash(script_content)
+        _render_storyboard_results(global_chars, global_scenes, global_shots, global_atmosphere, accumulated_seconds)
 
-            # v3.0：展示全局氛围画质
-            if global_atmosphere:
-                st.markdown("### 🎨 全局氛围与画质设定")
-                with st.expander("展开查看完整【氛围与画质】", expanded=False):
-                    st.text_area(
-                        "【氛围与画质】", global_atmosphere,
-                        height=200, key="global_atmosphere_display",
-                        label_visibility="collapsed"
-                    )
-                    st.caption("📋 以上为 LLM 根据剧本自动生成的全局视觉设定，可直接复制使用。")
-
-            st.markdown(f"### 🎥 Seedance 2.0 分镜矩阵（总计 {len(global_shots)} 镜 / 累计时长 {total_min} 分 {total_sec} 秒）")
-            st.caption("📌 每镜一行「终极Seedance提示词」—— 直接复制粘贴到 Seedance 2.0 即可使用")
-
-            cols_order = ["镜头号"] + [c for c in global_shots[0].keys() if c != "镜头号"]
-            df_shots = pd.DataFrame(global_shots)[cols_order]
-
-            # v3.0：代码组装保证输出4列，此处仅做兜底确保
-            for required_col in ["时间码", "景别机位运镜", "终极Seedance提示词"]:
-                if required_col not in df_shots.columns:
-                    df_shots[required_col] = ""
-
-            display_cols = ["镜头号", "时间码", "景别机位运镜", "终极Seedance提示词"]
-            df_display = df_shots[[c for c in display_cols if c in df_shots.columns]]
-
-            st.data_editor(
-                df_display,
-                num_rows="dynamic",
-                use_container_width=True,
-                column_config={
-                    "镜头号": st.column_config.NumberColumn(width="small", format="%d"),
-                    "时间码": st.column_config.TextColumn(width="small"),
-                    "景别机位运镜": st.column_config.TextColumn(width="medium"),
-                    "终极Seedance提示词": st.column_config.TextColumn(width="large"),
-                }
-            )
-
-            # Excel下载 — v2.0 格式
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine="openpyxl") as writer:
-                df_display.to_excel(writer, index=False, sheet_name="Seedance2.0分镜")
-            st.download_button(
-                "📥 下载 Seedance 分镜矩阵 (Excel)", data=out.getvalue(),
-                file_name="分镜矩阵_Seedance2.0.xlsx"
-            )
-        else:
-            st.warning("⚠️ CrewAI 工作流未返回有效分镜数据")
+    elif st.session_state.get("storyboard_shots") and st.session_state.get("storyboard_script_hash") == hash(script_content):
+        # 下载按钮或页面刷新触发 rerun 后，从缓存恢复结果，避免页面“消失”
+        _render_storyboard_results(
+            st.session_state.storyboard_chars,
+            st.session_state.storyboard_scenes,
+            st.session_state.storyboard_shots,
+            st.session_state.storyboard_atmosphere,
+            st.session_state.storyboard_seconds,
+        )

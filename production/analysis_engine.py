@@ -667,6 +667,67 @@ def extract_characters(text, client, model_name, kwargs):
     return call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.1).get("global_characters", [])
 
 
+def extract_scene_visual_prompts(scene_list, script_content, client, model_name, kwargs):
+    """为已提取的物理场景列表生成固定资产用的文生图提示词。
+
+    每个场景输出 visual_prompt（可直接用于即梦/Stable Diffusion 等文生图工具固定场景资产），
+    并补充关键视觉元素、光线氛围、色调等美术字段。
+    """
+    if not scene_list:
+        return []
+
+    import json
+
+    # 控制输入长度，避免爆 token
+    scene_summary = json.dumps(scene_list[:60], ensure_ascii=False)
+    eval_text = script_content if len(script_content) < 20000 else script_content[:20000]
+
+    sys_prompt = (
+        "你是资深影视美术指导与 AI 文生图提示词专家。"
+        "你的任务是根据场景列表和剧本节选，为每个独立物理场景生成一份『固定资产』级别的场景文生图提示词。"
+        "提示词必须可直接用于即梦、Stable Diffusion、Midjourney 等文生图工具，保持同一场景在多镜之间视觉一致。"
+    )
+    user_prompt = f"""
+请为下面场景列表中的每个场景生成固定场景资产用的文生图提示词。
+
+【必须包含的字段】（JSON 输出）：
+- 场景名称：原场景名
+- 内外景：内/外
+- 日夜：日/夜/黄昏/黎明
+- visual_prompt：完整生图提示词（中文或英文均可，建议用英文关键词+中文细节），包含：空间类型、建筑风格/时代感、时间、光线方向、色调、关键道具、天气/环境、氛围情绪
+- 关键视觉元素：list，该场景下必须保持一致的视觉锚点（如“做旧皮沙发”、“霓虹招牌”、“木质书架”）
+- 光线氛围：如“侧光暖黄”、“冷白顶光”、“黄昏金色侧逆光”
+- 色调：如“低饱和青橙”、“暖棕复古”、“冷蓝霓虹”
+
+【输出 JSON 格式】：
+{{ "scene_assets": [{{"场景名称": "...", "内外景": "...", "日夜": "...", "visual_prompt": "...", "关键视觉元素": ["..."], "光线氛围": "...", "色调": "..."}}] }}
+
+场景列表：
+{scene_summary}
+
+剧本节选（供理解上下文）：
+{eval_text}
+"""
+    try:
+        result = call_llm_json(client, model_name, sys_prompt, user_prompt, kwargs, temp=0.2)
+        assets = result.get("scene_assets", [])
+    except Exception:
+        assets = []
+
+    # 按场景名称合并回原始 scene_list，保持顺序；LLM 没返回的字段用原字段兜底
+    name_to_asset = {a.get("场景名称", ""): a for a in assets if a.get("场景名称", "")}
+    merged = []
+    for scene in scene_list:
+        s = dict(scene)
+        asset = name_to_asset.get(s.get("场景名称", ""), {})
+        s["visual_prompt"] = asset.get("visual_prompt", s.get("visual_prompt", ""))
+        s["关键视觉元素"] = asset.get("关键视觉元素", s.get("关键视觉元素", []))
+        s["光线氛围"] = asset.get("光线氛围", s.get("光线氛围", ""))
+        s["色调"] = asset.get("色调", s.get("色调", ""))
+        merged.append(s)
+    return merged
+
+
 def extract_storyboard(chunk_text, global_chars, client, model_name, kwargs):
     """简易分镜提取（非CrewAI方案，备用）"""
     import json
