@@ -16,7 +16,6 @@ import time
 import socket
 import subprocess
 import threading
-import webview
 import logging
 
 
@@ -167,6 +166,7 @@ def _log_streamlit_output(proc: subprocess.Popen) -> None:
 # ── PyWebView 窗口 ──────────────────────────────────────────────────────────
 def create_window(url: str, width: int = 1440, height: int = 900) -> None:
     """创建桌面窗口并加载本地 Streamlit 服务。"""
+    import webview  # 延迟导入：仅桌面模式需要，浏览器模式无需安装
     webview.create_window(
         title=APP_TITLE,
         url=url,

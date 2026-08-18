@@ -77,17 +77,18 @@ if %errorlevel% neq 0 (
 
 :: ── Step 5: 检测端口并启动 ──
 echo.
-echo [5/5] 启动应用...
+echo [5/5] 启动桌面应用...
 echo.
 
-python "%~dp0start.py"
+python "%~dp0desktop_app.py"
 
 if %errorlevel% neq 0 (
     echo.
-    echo   [ERROR] 应用启动失败
+    echo   [WARN] 桌面窗口启动失败，尝试用浏览器模式启动...
     echo   请检查上方错误信息，或尝试手动运行:
-    echo   python start.py
+    echo   python start.py --browser
     echo.
+    python "%~dp0start.py" --browser
 )
 
 pause
