@@ -590,7 +590,7 @@ _WRITER_REVISION_DOPAMINE_PROMPT = """你是一位专业电影编剧，精通爆
 """
 
 
-def _build_writer_revision_prompt(script_format: str) -> str:
+def _build_writer_revision_prompt(script_format: str, work_type: str = "tv") -> str:
     """
     v5.0 缓存优化版：构建编剧定向精修 system prompt（纯常量，无动态变量）。
     所有动态内容（previous_script/user_feedback/episode_num 等）已移至 user prompt。
@@ -600,6 +600,15 @@ def _build_writer_revision_prompt(script_format: str) -> str:
         if is_micro_drama_mode(script_format)
         else _WRITER_REVISION_BASE_PROMPT
     )
+    # 电影模式：追加禁止拆集的硬约束
+    if work_type == "movie":
+        base = base + "\n\n" + (
+            "# ⚠️ 电影剧本硬性约束\n"
+            "- 这是**电影**剧本，精修后必须保持「幕/场次(SCENE)」结构\n"
+            "- **绝对禁止**将电影剧本拆分为「第X集」电视剧结构\n"
+            "- 若原剧本是「第X集」格式，精修时应整合为单部电影场次线\n"
+            "- 每场用 \"SCENE N - 内景/外景 地点 - 时间\" 标注"
+        )
     # 【核心】动态 Prompt 路由：追加格式专属策略指令
     strategy = _get_format_strategy(script_format)
     suffix = strategy.get("writer_suffix", "")
@@ -621,6 +630,7 @@ def build_writer_prompt(
     previous_script: Optional[str] = None,
     user_feedback: Optional[str] = None,
     harness_memory_context: str = "",
+    work_type: str = "tv",
 ) -> str:
     """
     根据剧本格式构建编剧 system prompt（v5.0 缓存优化版）。
@@ -633,10 +643,11 @@ def build_writer_prompt(
         previous_script: 如果存在用户修改意见，此为之前的初稿剧本
         user_feedback: 用户的定向修改意见
         harness_memory_context: Harness 结构化记忆注入（v5.0: 由调用方处理，此参数保留兼容但不再注入 system prompt）
+        work_type: 'tv' 电视剧 / 'movie' 电影（电影模式禁止输出「第X集」）
     """
     # 定向精修分支：用户提交了针对本集剧本的修改意见
     if previous_script and user_feedback:
-        return _build_writer_revision_prompt(script_format)
+        return _build_writer_revision_prompt(script_format, work_type=work_type)
 
     # 正常生成分支：返回常量 system prompt
     base = _WRITER_DOPAMINE_PROMPT if is_micro_drama_mode(script_format) else _WRITER_BASE_PROMPT
@@ -1140,6 +1151,7 @@ def run_episode_writer_agent(
     previous_script: Optional[str] = None,
     user_feedback: Optional[str] = None,
     harness_memory_context: str = "",
+    work_type: str = "tv",
 ) -> AgentResult:
     """
     执行执行编剧 Agent - 撰写指定集数的完整剧本。
@@ -1148,6 +1160,7 @@ def run_episode_writer_agent(
         previous_script: 之前的初稿剧本（用于定向精修）
         user_feedback: 用户的定向修改意见
         harness_memory_context: Harness 结构化记忆注入（可选）
+        work_type: 'tv' 电视剧（按集）/ 'movie' 电影（按场次，禁止拆集）
     """
     is_revision = bool(previous_script and user_feedback)
 
@@ -1971,6 +1984,7 @@ def run_episode_revision_phase(
     progress_callback: Optional[Callable[[str, str, int, int], None]] = None,
     memory_store: Optional["StructuredMemoryStore"] = None,
     checkpoint_manager: Optional["CheckpointManager"] = None,
+    work_type: str = "tv",
 ) -> WorkflowContext:
     """
     定向精修阶段（单集剧本）：用户对某集剧本提交修改意见后，
@@ -2035,6 +2049,7 @@ def run_episode_revision_phase(
         previous_script=previous_script,
         user_feedback=user_feedback,
         harness_memory_context=harness_memory_context,
+        work_type=work_type,
     )
 
     if not writer_result.success:

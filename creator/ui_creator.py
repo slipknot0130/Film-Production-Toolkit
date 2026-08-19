@@ -400,8 +400,13 @@ def _execute_episode_revision_thread(episode_num, total_episodes, script_format,
     _set_ss("workflow_running", True)
     _set_ss("hitl_editing_episode", episode_num)
 
+    # 电影长片格式 → 电影模式（禁止拆集）
+    work_type = "movie" if "电影" in (script_format or "") else "tv"
+
     creator_add_log(f"🎯 启动第 {episode_num} 集定向精修（编剧→医生审核）...", "system")
     creator_add_log(f"   修改意见：{user_feedback[:80]}...", "info")
+    if work_type == "movie":
+        creator_add_log("   ⚠️ 电影模式：精修后保持场次结构，不拆分为多集", "info")
 
     try:
         outline_summary = outline[:1500] if outline else "（大纲摘要）"
@@ -420,6 +425,7 @@ def _execute_episode_revision_thread(episode_num, total_episodes, script_format,
             user_feedback=user_feedback,
             log_callback=creator_add_log,
             progress_callback=on_progress,
+            work_type=work_type,
         )
 
         if context.script_content:
@@ -642,6 +648,77 @@ def _clear_modification_state():
 # 剧本改编功能
 # =============================================================================
 
+# ═════════════════════════════════════════════════════════════════════════════
+# 电影专用改编 Prompt（work_type = 'movie'）
+# 核心区别：电影不分集，按「幕 / 场次(SCENE)」组织，禁止输出「第X集」
+# ═════════════════════════════════════════════════════════════════════════════
+
+# 电影改编 System Prompt（单次调用 / 全局约束版）
+_REWRITE_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本改编为电影文学剧本（screenplay）。
+
+## ⚠️ 最高约束：这是电影，不是电视剧
+- **绝对禁止输出「第X集」格式**。电影没有"集"的概念。
+- 电影剧本按「幕(Act) / 场次(SCENE)」组织，标准格式：
+  ```
+  【第一幕】
+  SCENE 1 - 内景/外景 地点 - 时间
+  （场景动作描述）
+  角色：台词
+  SCENE 2 - ...
+  【第二幕】
+  ...
+  【第三幕】
+  ...
+  ```
+- 若原剧本是以「第X集」形式给出的电视剧本，你必须在改编时**将其转换为电影场次结构**，
+  将多集内容重新整合为一条电影叙事线，而非简单保留集标题。
+
+## 核心原则（电影工业标准）
+1. **三幕结构完整性**：建置（约25%）→ 对抗（约50%）→ 解决（约25%）比例清晰
+2. **人物弧光**：主角必须有内在成长或蜕变，Ghost/Lie/Flaw 三角清晰
+3. **逻辑自洽**：人物动机要充分，情节转折有因果关系，禁用机械降神
+4. **视觉化写作**：用镜头语言思考，场景描写服务银幕呈现
+5. **主题强化**：每场戏都服务于主题，删除游离于主题之外的剧情
+
+## 扩充时（增加篇幅）
+- 深化人物弧光，增加内心戏和人物关系张力
+- 增加支线剧情，丰富世界观和配角塑造
+- 扩展关键场景，增加对白层次和潜台词
+
+## 压缩时（减少篇幅）
+- 保留核心结构节拍点，删除重复或冗余场景
+- 合并功能相似的场景，用更经济的叙事手段推进情节
+- 确保主题信息不丢失，保留标志性对白
+
+## 输出格式
+请输出完整的改编后电影剧本，使用上述「幕/场次」结构。
+每场用 "SCENE N - 内景/外景 地点 - 时间" 标注，N 为全局连续场次编号。
+
+## ⚠️ 格式约束（最高优先级，绝对不可违反）
+{episode_constraint}
+"""
+
+# 电影分块改编专用 System Prompt（不含全局约束，避免与每块指令冲突）
+_CHUNK_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本改编为电影文学剧本（screenplay）。
+
+## ⚠️ 最高约束：这是电影，不是电视剧
+- **绝对禁止输出「第X集」格式**。电影没有"集"的概念。
+- 电影剧本按「幕(Act) / 场次(SCENE)」组织，每场用 "SCENE N - 内景/外景 地点 - 时间" 标注。
+
+## 核心原则（电影工业标准）
+1. **三幕结构完整性**：建置 → 对抗 → 解决 比例清晰
+2. **人物弧光**：主角必须有内在成长或蜕变
+3. **逻辑自洽**：人物动机要充分，情节转折有因果关系
+4. **视觉化写作**：用镜头语言思考
+
+## 改编策略
+- **扩充**：深化人物弧光，增加内心戏和支线，扩展关键场景
+- **压缩**：保留核心节拍点，删除冗余场景，合并功能相似场景
+
+## 输出格式
+每场用 "SCENE N - 内景/外景 地点 - 时间" 标注，N 为全局连续场次编号。
+你必须严格遵守用户消息中的【场次要求】，不得输出「第X集」格式。"""
+
 # 情绪导向改编 Prompt（竖屏微短剧 / 短剧爽剧）
 _REWRITE_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
 
@@ -845,6 +922,129 @@ def _build_episode_constraint(src_ep: int, tgt_ep: int, instruction: str) -> str
             f"- 严格按照改编指令执行集数要求，不得随意增减集数\n"
             f"- 必须输出指令中明确要求的目标集数，不得提前结束"
         )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 电影模式：场次(SCENE)解析与约束
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _parse_movie_scenes(instruction: str, source_text: str) -> tuple[int, int]:
+    """
+    电影模式：从改编指令和原始剧本中解析「原始场次 / 目标场次」。
+    电影没有「集」的概念，统一用 SCENE 场次计数。
+    返回 (src_sc, tgt_sc)，无法解析时返回 (0, 0)。
+
+    兼容输入：
+    - "将30场扩充为50场" / "压缩到40场"
+    - 原剧本统计 SCENE 标记数量作为 src_sc 兜底
+    """
+    # 匹配「X场改成Y场」等表述（电影用"场"而非"集"）
+    patterns = [
+        r'(\d+)\s*场\s*(?:改(?:成|编|写|为)|压缩(?:为|到|成|至)|扩充(?:为|到|成|至)|精简(?:为|到|成|至)|缩减(?:为|到|成|至)|调整(?:为|到|成|至))\s*(\d+)\s*场',
+        r'从\s*(\d+)\s*场\s*(?:改|变|到|压缩|扩充|缩减|精简|调整)\s*(?:为|成|到|至)?\s*(\d+)\s*场',
+        r'(\d+)\s*场\s*(?:→|-|->)\s*(\d+)\s*场',
+        r'(?:把|将|把这个|将这个)\s*(\d+)\s*场.*?(?:扩充|压缩|改编|改成|改写|精简|缩减|调整|扩展|延伸|拉长).*?(?:到|为|成|至)\s*(\d+)\s*场',
+        r'(?:扩充|压缩|改编|改成|改写|精简|缩减|调整|扩展|延伸|拉长|改).*?(\d+)\s*场.*?(?:到|为|成|至)\s*(\d+)\s*场',
+    ]
+    for p in patterns:
+        m = re.search(p, instruction)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            return (a, b)
+
+    # 兜底：从指令中提取所有"X场"
+    single = re.findall(r'(\d+)\s*场', instruction)
+    # 从剧本正文统计场次（SCENE N / 场N）
+    sc_nums = re.findall(r'(?:SCENE|场)\s*(\d+)', source_text, re.IGNORECASE)
+    src_sc = max((int(x) for x in sc_nums), default=0) if sc_nums else 0
+
+    if not single:
+        return (src_sc, 0)
+
+    if len(single) >= 2:
+        nums = sorted([int(x) for x in single])
+        if src_sc > 0:
+            closest = min(nums, key=lambda x: abs(x - src_sc))
+            tgt = [n for n in nums if n != closest]
+            if tgt:
+                return (closest, tgt[0])
+        return (nums[-1], nums[0])
+    else:
+        return (src_sc, int(single[0]))
+
+
+def _build_movie_constraint(src_sc: int, tgt_sc: int, instruction: str) -> str:
+    """电影模式：根据解析到的场次生成强约束文字（禁止出现「第X集」）。"""
+    constraint = (
+        "- **这是电影剧本，绝对禁止输出「第X集」格式**，必须按幕/场次(SCENE)组织。\n"
+    )
+    if tgt_sc > 0 and src_sc > 0:
+        action = "压缩" if tgt_sc < src_sc else "扩充"
+        constraint += (
+            f"- 原始剧本约 **{src_sc} 场**，目标改编为 **{tgt_sc} 场**（{action}）\n"
+            f"- 你**必须**输出恰好 **{tgt_sc} 场**（SCENE 1 到 SCENE {tgt_sc}），不得多也不得少\n"
+            f"- 场次用连续编号标注：SCENE 1, SCENE 2, ... SCENE {tgt_sc}\n"
+            f"- 若原剧本是「第X集」电视剧结构，必须重新整合为电影场次线，不得保留集标题"
+        )
+    elif tgt_sc > 0:
+        constraint += (
+            f"- 目标场次：**{tgt_sc} 场**（绝对约束）\n"
+            f"- 你**必须**输出恰好 **{tgt_sc} 场**（SCENE 1 到 SCENE {tgt_sc}）\n"
+            f"- 每场都要有完整的场景描写和对白"
+        )
+    else:
+        constraint += (
+            "- 严格按照改编指令执行，输出完整电影剧本（幕/场次结构），不得拆分为多集\n"
+            "- 若原剧本是「第X集」结构，必须转换为电影场次线"
+        )
+    return constraint
+
+
+def _split_source_by_scenes(source_text: str) -> list[dict]:
+    """
+    电影模式：按场次标记切分原始剧本，返回 [{sc_start, sc_end, content}, ...]
+    兼容「第X集」电视剧结构（转为单部电影处理，不按集拆分）。
+    """
+    # 优先按 SCENE / 场 标记切分
+    scene_pattern = r'((?:SCENE|场)\s*\d+\s*[-—–]?\s*(?:内景|外景|INT|EXT)?[^\\n]*)'
+    splits = re.split(scene_pattern, source_text, flags=re.IGNORECASE)
+    if len(splits) > 2:
+        blocks = []
+        i = 1
+        while i < len(splits):
+            label = splits[i].strip()
+            nums = re.findall(r'(\d+)', label)
+            sc_num = int(nums[0]) if nums else 0
+            content_parts = []
+            while i + 1 < len(splits):
+                nxt = splits[i + 1]
+                if re.match(r'(?:SCENE|场)\s*\d+', nxt.strip(), re.IGNORECASE):
+                    break
+                content_parts.append(nxt)
+                i += 1
+            content = label + "".join(content_parts)
+            blocks.append({"sc_start": sc_num, "sc_end": sc_num, "content": content.strip()})
+            i += 1
+        if blocks:
+            return blocks
+
+    # 退而求其次：按「第X集」切分后再合并为单部电影（电影模式不保留集结构）
+    sep = "========================================"
+    if sep in source_text:
+        parts = [p.strip() for p in source_text.split(sep) if p.strip()]
+        if parts:
+            return [{"sc_start": 0, "sc_end": 0, "content": "\n\n".join(parts)}]
+
+    # 兜底：按段落均分
+    paragraphs = [p for p in source_text.split('\n') if p.strip()]
+    if not paragraphs:
+        return [{"sc_start": 0, "sc_end": 0, "content": source_text}]
+    chunk_size = max(5, len(paragraphs) // max(1, len(paragraphs) // 15))
+    blocks = []
+    for i in range(0, len(paragraphs), chunk_size):
+        chunk = "\n".join(paragraphs[i:i + chunk_size])
+        blocks.append({"sc_start": 0, "sc_end": 0, "content": chunk})
+    return blocks
 
 
 # =============================================================================
@@ -1293,6 +1493,37 @@ def _render_script_rewrite():
     style_label = "🔥 情绪导向（多巴胺爽剧）" if rewrite_style == "emotion" else "🏛 结构导向（三幕式）"
     st.caption(f"当前风格：{style_label}")
 
+    # ── 剧本类型（电影 / 电视剧）──  最高优先级开关
+    st.markdown("**🎬 剧本类型**")
+    wt_col1, wt_col2 = st.columns(2)
+    with wt_col1:
+        is_tv = st.toggle(
+            "📺 电视剧",
+            value=True,
+            key="rewrite_worktype_tv",
+            help="按「第X集」组织，支持集数扩缩"
+        )
+    with wt_col2:
+        is_movie = st.toggle(
+            "🎬 电影",
+            value=False,
+            key="rewrite_worktype_movie",
+            help="按「幕/场次(SCENE)」组织，不分集，禁止输出「第X集」"
+        )
+
+    if is_tv and is_movie:
+        st.warning("⚠️ 请只选择一种剧本类型")
+        return
+    if not is_tv and not is_movie:
+        work_type = "tv"   # 默认电视剧
+    elif is_tv:
+        work_type = "tv"
+    else:
+        work_type = "movie"
+
+    wt_label = "📺 电视剧（按集）" if work_type == "tv" else "🎬 电影（按场次）"
+    st.caption(f"当前类型：{wt_label}")
+
     st.markdown("---")
 
     # ── 开始改编按钮 ──
@@ -1313,18 +1544,25 @@ def _render_script_rewrite():
         _set_ss("rewrite_running", True)
         _set_ss("rewrite_result", "")
 
-        # ── 解析集数，构建强约束 ──
-        src_ep, tgt_ep = _parse_episode_numbers(rewrite_instruction.strip(), source_text)
-        episode_constraint = _build_episode_constraint(src_ep, tgt_ep, rewrite_instruction.strip())
+        # ═══════════════════════════════════════════════════════════════
+        # 电影 / 电视剧 分流：解析目标单位 + 构建约束 + 选择 Prompt
+        # ═══════════════════════════════════════════════════════════════
+        if work_type == "movie":
+            # 电影：按场次(SCENE)解析，禁止输出「第X集」
+            src_ep, tgt_ep = _parse_movie_scenes(rewrite_instruction.strip(), source_text)
+            episode_constraint = _build_movie_constraint(src_ep, tgt_ep, rewrite_instruction.strip())
+            raw_style_prompt = _REWRITE_MOVIE_PROMPT
+            chunk_style_prompt = _CHUNK_MOVIE_PROMPT
+        else:
+            # 电视剧：按集数解析（原逻辑）
+            src_ep, tgt_ep = _parse_episode_numbers(rewrite_instruction.strip(), source_text)
+            episode_constraint = _build_episode_constraint(src_ep, tgt_ep, rewrite_instruction.strip())
+            raw_style_prompt = _REWRITE_EMOTION_PROMPT if rewrite_style == "emotion" else _REWRITE_STRUCTURE_PROMPT
+            chunk_style_prompt = (
+                _CHUNK_EMOTION_PROMPT if rewrite_style == "emotion" else _CHUNK_STRUCTURE_PROMPT
+            )
 
-        # 将集数约束注入 System Prompt（单次调用模式用）
-        raw_style_prompt = _REWRITE_EMOTION_PROMPT if rewrite_style == "emotion" else _REWRITE_STRUCTURE_PROMPT
         style_prompt = raw_style_prompt.format(episode_constraint=episode_constraint)
-
-        # 分块模式专用 Prompt（不含全局集数约束，避免冲突）
-        chunk_style_prompt = (
-            _CHUNK_EMOTION_PROMPT if rewrite_style == "emotion" else _CHUNK_STRUCTURE_PROMPT
-        )
 
         provider, base_url, api_key, model = _get_llm_params()
         import httpx
@@ -1339,18 +1577,27 @@ def _render_script_rewrite():
 
         # ── 判断是否需要分块改编 ──
         # 规则：目标集数 > 15 或 原始文本 > 15000 字 → 自动启用分块流水线
+        # 电影模式：用场次数量近似判断（tgt_ep 此处复用为场次目标）
         need_chunking = (tgt_ep > 15) or (len(source_text) > 15000 and tgt_ep > 0) or (tgt_ep == 0 and len(source_text) > 15000)
 
         full_result = ""
         ws_broken = False
         start_time = _time.time()
 
-        if tgt_ep > 0 and src_ep > 0:
-            status_title = f"⏳ 正在改编：{src_ep}集 → {tgt_ep}集"
-        elif tgt_ep > 0:
-            status_title = f"⏳ 正在改编，目标 {tgt_ep} 集"
+        if work_type == "movie":
+            if tgt_ep > 0 and src_ep > 0:
+                status_title = f"⏳ 正在改编（电影）：{src_ep}场 → {tgt_ep}场"
+            elif tgt_ep > 0:
+                status_title = f"⏳ 正在改编（电影），目标 {tgt_ep} 场"
+            else:
+                status_title = "⏳ 正在连接模型，准备改编（电影）..."
         else:
-            status_title = "⏳ 正在连接模型，准备改编..."
+            if tgt_ep > 0 and src_ep > 0:
+                status_title = f"⏳ 正在改编：{src_ep}集 → {tgt_ep}集"
+            elif tgt_ep > 0:
+                status_title = f"⏳ 正在改编，目标 {tgt_ep} 集"
+            else:
+                status_title = "⏳ 正在连接模型，准备改编..."
 
         status_box = st.status(status_title, expanded=True)
         progress_text = status_box.empty()
@@ -1361,11 +1608,38 @@ def _render_script_rewrite():
                 # ═════════════════════════════════════════════════════════
                 # 小体量：单次调用模式（与原逻辑一致）
                 # ═════════════════════════════════════════════════════════
-                tgt_ep_notice = (
-                    f"\n\n⚠️ **核心约束再次确认：你必须输出恰好 {tgt_ep} 集，从第1集到第{tgt_ep}集，一集不多一集不少。**"
-                    if tgt_ep > 0 else ""
-                )
-                user_msg = f"""## 【改编指令（最高优先级，必须严格执行）】
+                if work_type == "movie":
+                    # 电影模式：输出按场次，禁止「第X集」
+                    tgt_ep_notice = (
+                        f"\n\n⚠️ **核心约束再次确认：这是电影剧本，你必须输出恰好 {tgt_ep} 场"
+                        f"（SCENE 1 到 SCENE {tgt_ep}），绝对禁止输出「第X集」格式。**"
+                        if tgt_ep > 0 else
+                        "\n\n⚠️ **核心约束再次确认：这是电影剧本，必须按幕/场次(SCENE)结构输出，绝对禁止「第X集」格式。**"
+                    )
+                    unit_src = f"共 {src_ep} 场" if src_ep > 0 else "结构参考"
+                    user_msg = f"""## 【改编指令（最高优先级，必须严格执行）】
+
+{rewrite_instruction.strip()}
+{tgt_ep_notice}
+
+---
+
+## 原始剧本（{unit_src}，仅供参考，情节可删改合并）
+
+{source_text}
+
+---
+
+## 输出要求
+请严格按照上述改编指令，输出完整的改编后电影剧本。
+{f"目标场次：**{tgt_ep} 场**（SCENE 1 到 SCENE {tgt_ep}），必须全部输出完整内容。" if tgt_ep > 0 else "按指令要求输出完整电影剧本（幕/场次结构）。"}
+使用「幕/场次」结构：每场用 "SCENE N - 内景/外景 地点 - 时间" 标注。"""
+                else:
+                    tgt_ep_notice = (
+                        f"\n\n⚠️ **核心约束再次确认：你必须输出恰好 {tgt_ep} 集，从第1集到第{tgt_ep}集，一集不多一集不少。**"
+                        if tgt_ep > 0 else ""
+                    )
+                    user_msg = f"""## 【改编指令（最高优先级，必须严格执行）】
 
 {rewrite_instruction.strip()}
 {tgt_ep_notice}
@@ -1381,7 +1655,8 @@ def _render_script_rewrite():
 ## 输出要求
 请严格按照上述改编指令，输出完整的改编后剧本。
 {f"目标集数：**{tgt_ep} 集**，从第1集写到第{tgt_ep}集，必须全部输出完整内容。" if tgt_ep > 0 else "按指令要求的集数输出完整改编剧本。"}
-每集用"========================================"分隔，开头标注"第X集"。"""
+每集用"========================================"分隔，开头标注"第X集"。""
+
 
                 is_ollama = "Ollama" in provider
                 if tgt_ep > 0:
@@ -1399,8 +1674,9 @@ def _render_script_rewrite():
                     extra = {"max_tokens": dynamic_max_tokens}
 
                 if tgt_ep > 0:
+                    unit = "场" if work_type == "movie" else "集"
                     progress_text.info(
-                        f"🎯 已识别改编目标：**{src_ep} 集 → {tgt_ep} 集** | "
+                        f"🎯 已识别改编目标：**{src_ep} {unit} → {tgt_ep} {unit}** | "
                         f"单次调用模式 | 输出上限：{dynamic_max_tokens:,} tokens"
                     )
 
@@ -1432,12 +1708,16 @@ def _render_script_rewrite():
                         last_update = now
                         try:
                             char_count = len(full_result)
-                            done_eps = len(re.findall(r'第\s*\d+\s*集', full_result))
-                            ep_info = f" | 已完成 **{done_eps}/{tgt_ep}** 集" if tgt_ep > 0 else ""
+                            if work_type == "movie":
+                                done_units = len(re.findall(r'SCENE\s*\d+', full_result, re.IGNORECASE))
+                                unit_info = f" | 已完成 **{done_units}/{tgt_ep}** 场" if tgt_ep > 0 else ""
+                            else:
+                                done_units = len(re.findall(r'第\s*\d+\s*集', full_result))
+                                unit_info = f" | 已完成 **{done_units}/{tgt_ep}** 集" if tgt_ep > 0 else ""
                             elapsed = now - start_time
                             progress_text.markdown(
                                 f"🤖 正在生成改编内容... 已输出 **{char_count:,}** 字 | "
-                                f"用时 **{elapsed:.0f}** 秒{ep_info}"
+                                f"用时 **{elapsed:.0f}** 秒{unit_info}"
                             )
                             result_area.markdown(full_result + " ▌")
                         except Exception:
@@ -1448,8 +1728,9 @@ def _render_script_rewrite():
                 # 大体量：分块改编流水线
                 # Phase 0 → Phase 1-N → Phase Final
                 # ═════════════════════════════════════════════════════════
+                unit_label = "场" if work_type == "movie" else "集"
                 progress_text.info(
-                    f"🎯 已识别改编目标：**{src_ep} 集 → {tgt_ep} 集** | "
+                    f"🎯 已识别改编目标：**{src_ep} {unit_label} → {tgt_ep} {unit_label}** | "
                     f"体量较大，启用分块改编流水线..."
                 )
 
@@ -1464,15 +1745,18 @@ def _render_script_rewrite():
                         f"📋 **Phase 0/3**：全局摘要已生成（{len(story_summary):,} 字）✅"
                     )
 
-                # ── 切分原始剧本 ──
-                source_blocks = _split_source_by_episodes(source_text)
+                # ── 切分原始剧本（电影按场次，电视按集）──
+                if work_type == "movie":
+                    source_blocks = _split_source_by_scenes(source_text)
+                else:
+                    source_blocks = _split_source_by_episodes(source_text)
                 chunk_plan = _compute_chunk_plan(src_ep, tgt_ep, source_blocks)
                 total_chunks = len(chunk_plan)
 
                 progress_text.markdown(
                     f"✂️ **Phase 1/3**：已将原始剧本切分为 **{len(source_blocks)}** 段，"
                     f"计划分 **{total_chunks}** 轮改写 | "
-                    f"目标：第1集→第{tgt_ep}集"
+                    f"目标：第1{unit_label}→第{tgt_ep}{unit_label}"
                 )
 
                 # ── Phase 1-N：逐块改写 ──
@@ -1492,7 +1776,7 @@ def _render_script_rewrite():
                     # 每块单独的 status 容器
                     chunk_label = (
                         f"✍️ 第 {ci+1}/{total_chunks} 轮改写："
-                        f"原始第{src_start}-{src_end}集 → 目标第{tgt_start}-{tgt_end}集"
+                        f"原始第{src_start}-{src_end}{unit_label} → 目标第{tgt_start}-{tgt_end}{unit_label}"
                     )
 
                     progress_text.markdown(
@@ -1511,9 +1795,10 @@ def _render_script_rewrite():
                         status_box, progress_text,
                     )
 
-                    # 收集结果
+                    # 收集结果（电影用场次分隔，电视用集分隔）
+                    sep = "\n\n" + "=" * 40 + "\n\n"
                     chunk_results.append(chunk_result)
-                    full_result = "\n\n========================================\n\n".join(chunk_results)
+                    full_result = sep.join(chunk_results)
 
                     # 更新前情衔接：取本块改写结果的最后800字
                     prev_tail = chunk_result[-800:] if len(chunk_result) > 800 else chunk_result
@@ -1521,13 +1806,18 @@ def _render_script_rewrite():
                     # 更新全局UI
                     elapsed = _time.time() - start_time
                     total_chars = len(full_result)
-                    actual_eps = len(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
+                    if work_type == "movie":
+                        actual_units = len(set(re.findall(r'SCENE\s*(\d+)', full_result, re.IGNORECASE)))
+                        unit_done_str = f"已完成约 **{actual_units}** 场"
+                    else:
+                        actual_units = len(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
+                        unit_done_str = f"已完成约 **{actual_units}** 集"
                     try:
                         result_area.markdown(full_result + " ▌")
                         progress_text.markdown(
                             f"✅ 第 {ci+1}/{total_chunks} 轮改写完成 | "
                             f"累计 **{total_chars:,}** 字 | "
-                            f"已完成约 **{actual_eps}** 集 | "
+                            f"{unit_done_str} | "
                             f"用时 **{elapsed:.0f}** 秒"
                         )
                     except Exception:
@@ -1535,29 +1825,53 @@ def _render_script_rewrite():
 
                 # ── Phase Final：合并 + 衔接检查 ──
                 progress_text.markdown(
-                    f"🔗 **Phase 2/3**：正在合并 {total_chunks} 段改写结果，检查集数完整性..."
+                    f"🔗 **Phase 2/3**：正在合并 {total_chunks} 段改写结果，检查{unit_label}完整性..."
                 )
 
-                # 合并所有块
-                full_result = "\n\n========================================\n\n".join(chunk_results)
+                # 合并所有块（电影用场次分隔，电视用集分隔）
+                sep = "\n\n" + "=" * 40 + "\n\n"
+                full_result = sep.join(chunk_results)
 
-                # 统计实际集数
-                actual_ep_nums = sorted(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
-                final_ep_count = len(actual_ep_nums)
+                # 统计实际场次/集数
+                if work_type == "movie":
+                    actual_ep_nums = sorted(set(re.findall(r'SCENE\s*(\d+)', full_result, re.IGNORECASE)), key=int)
+                    final_ep_count = len(actual_ep_nums)
+                else:
+                    actual_ep_nums = sorted(set(re.findall(r'第\s*(\d+)\s*集', full_result)))
+                    final_ep_count = len(actual_ep_nums)
 
-                # 如果集数不够，尝试补写缺失的集
+                # 如果场次/集数不够，尝试补写缺失的
                 if tgt_ep > 0 and final_ep_count < tgt_ep:
                     missing_start = final_ep_count + 1
                     missing_count = tgt_ep - final_ep_count
 
                     progress_text.markdown(
-                        f"🔧 **Phase 3/3**：检测到缺失 **{missing_count}** 集"
-                        f"（第{missing_start}-{tgt_ep}集），正在补写..."
+                        f"🔧 **Phase 3/3**：检测到缺失 **{missing_count}** {unit_label}"
+                        f"（第{missing_start}-{tgt_ep}{unit_label}），正在补写..."
                     )
 
-                    # 补写缺失的集数
+                    # 补写缺失的部分
                     supplement_prompt = chunk_style_prompt
-                    supplement_user = f"""## 全剧摘要（全局参考）
+                    if work_type == "movie":
+                        supplement_user = f"""## 全剧摘要（全局参考）
+{story_summary}
+
+---
+
+## 前情衔接（已输出的最后部分）
+{prev_tail}
+
+---
+
+## 补写任务
+前面的改写已输出 SCENE 1 到 SCENE {final_ep_count}。
+你必须**紧接着**前情，输出 SCENE {missing_start} 到 SCENE {tgt_ep}，共 {missing_count} 场。
+- 开头必须与前情自然衔接
+- 每场用 "SCENE N - 内景/外景 地点 - 时间" 标注
+- 这是电影剧本，绝对禁止「第X集」格式
+- 改编指令：{rewrite_instruction.strip()}"""
+                    else:
+                        supplement_user = f"""## 全剧摘要（全局参考）
 {story_summary}
 
 ---
@@ -1621,12 +1935,12 @@ def _render_script_rewrite():
                         pass
 
                     if supplement_result.strip():
-                        full_result += "\n\n========================================\n\n" + supplement_result.strip()
+                        full_result += sep + supplement_result.strip()
                         progress_text.markdown(f"🔧 补写完成，新增约 **{len(supplement_result):,}** 字")
                     else:
                         progress_text.warning("⚠️ 补写未能生成内容，可能受模型限制")
                 else:
-                    progress_text.markdown("🔗 合并完成，集数完整 ✅")
+                    progress_text.markdown(f"🔗 合并完成，{unit_label}数完整 ✅")
 
             # ═════════════════════════════════════════════════════════
             # 统一收尾逻辑（无论分块/单次）
@@ -1654,12 +1968,13 @@ def _render_script_rewrite():
                 if not ws_broken:
                     result_area.markdown(full_result)
 
-                # 集数不足时给用户提示
+                # 场次/集数不足时给用户提示
                 if tgt_ep > 0 and final_ep_count < tgt_ep:
+                    unit = "场" if work_type == "movie" else "集"
                     st.warning(
-                        f"⚠️ 改编输出 **{final_ep_count}** 集，未达到目标 **{tgt_ep}** 集。\n\n"
+                        f"⚠️ 改编输出 **{final_ep_count}** {unit}，未达到目标 **{tgt_ep}** {unit}。\n\n"
                         f"系统已自动尝试补写但仍未满足。可尝试：\n"
-                        f"1. 缩减目标集数（如60→50集→40集分步走）\n"
+                        f"1. 缩减目标{unit}数（分步走）\n"
                         f"2. 换用支持更长上下文的模型\n"
                         f"3. 将改编指令写得更具体，减少模型自由发挥空间"
                     )
@@ -1816,6 +2131,35 @@ def _render_initial_bridge_panel(script_text, analysis_feedback):
     st.markdown("---")
     st.markdown("### 🚀 修改操作")
 
+    # ── 剧本类型（电影 / 电视剧）──
+    st.markdown("**🎬 剧本类型**")
+    cm_wt1, cm_wt2 = st.columns(2)
+    with cm_wt1:
+        cm_is_tv = st.toggle(
+            "📺 电视剧",
+            value=True,
+            key="crossmode_worktype_tv",
+            help="按「第X集」组织，修改后保持集结构"
+        )
+    with cm_wt2:
+        cm_is_movie = st.toggle(
+            "🎬 电影",
+            value=False,
+            key="crossmode_worktype_movie",
+            help="按「幕/场次(SCENE)」组织，修改后禁止拆成多集"
+        )
+    if cm_is_tv and cm_is_movie:
+        st.warning("⚠️ 请只选择一种剧本类型")
+        return
+    if not cm_is_tv and not cm_is_movie:
+        cm_work_type = "tv"
+    elif cm_is_tv:
+        cm_work_type = "tv"
+    else:
+        cm_work_type = "movie"
+    cm_wt_label = "📺 电视剧（按集）" if cm_work_type == "tv" else "🎬 电影（按场次）"
+    st.caption(f"当前类型：{cm_wt_label}")
+
     col_mod, col_back, col_save = st.columns([1.5, 1, 1])
 
     with col_mod:
@@ -1846,6 +2190,8 @@ def _render_initial_bridge_panel(script_text, analysis_feedback):
                 ]
                 # 保存当前剧本到持久变量，供线程读取（避免被 rerun 清空）
                 st.session_state.cross_mode_script_for_modification = edited_script
+                # 保存剧本类型，供线程读取
+                st.session_state.cross_mode_work_type = cm_work_type
 
                 def _direct_modification_thread():
                     """在后台线程中执行AI修改，支持实时进度更新"""
@@ -1871,13 +2217,26 @@ def _render_initial_bridge_panel(script_text, analysis_feedback):
                         # Step 2: 准备剧本数据
                         script_to_modify = st.session_state.cross_mode_script_for_modification
                         script_length = len(script_to_modify)
-                        _update_progress(20, "正在准备修改策略...", f"📝 剧本长度：{script_length} 字符，准备修改策略")
+                        work_type = st.session_state.get("cross_mode_work_type", "tv")
+                        _update_progress(20, "正在准备修改策略...", f"📝 剧本长度：{script_length} 字符，准备修改策略 | 类型：{work_type}")
 
                         # Step 3: 构建智能修改Prompt（支持局部修改）
                         _update_progress(25, "正在构建AI修改指令...", "🔧 构建AI修改指令...")
 
                         # 判断剧本长度，决定使用全文修改还是局部修改策略
                         use_partial_mode = script_length > 8000  # 超过8000字符使用局部修改
+
+                        # 电影模式：追加禁止拆集的硬约束
+                        if work_type == "movie":
+                            type_constraint = (
+                                "\n\n# ⚠️ 电影剧本硬性约束\n"
+                                "- 这是**电影**剧本，修改后必须保持「幕/场次(SCENE)」结构\n"
+                                "- **绝对禁止**将电影剧本拆分为「第X集」电视剧结构\n"
+                                "- 若原剧本是「第X集」格式，修改时应整合为单部电影场次线\n"
+                                "- 每场用 \"SCENE N - 内景/外景 地点 - 时间\" 标注"
+                            )
+                        else:
+                            type_constraint = ""
 
                         if use_partial_mode:
                             _update_progress(30, "采用局部修改模式（剧本较长）...", "🎯 剧本较长，采用局部修改模式，只修改有问题段落")
@@ -1900,6 +2259,7 @@ def _render_initial_bridge_panel(script_text, analysis_feedback):
    - 保持原有格式（包括集数标题、场景标记、角色对话格式等）
    - 不要删减集数或场景数量，在原有框架内优化
    - 确保修改后的剧本逻辑自洽、情绪节奏紧凑、人物弧光完整
+{type_constraint}
 """
                         else:
                             _update_progress(30, "采用全文修改模式（剧本较短）...", "📝 剧本较短，采用全文修改模式")
@@ -1917,6 +2277,7 @@ def _render_initial_bridge_panel(script_text, analysis_feedback):
 3. 不要删减集数或场景数量，在原有框架内优化
 4. 确保修改后的剧本逻辑自洽、情绪节奏紧凑、人物弧光完整
 5. 输出修订后的完整剧本
+{type_constraint}
 """
 
                         # Step 4: 调用LLM
