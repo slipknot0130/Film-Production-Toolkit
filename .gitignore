@@ -41,6 +41,9 @@ env/
 *.log
 *.tmp
 
+# ── PyInstaller 打包产物 ──
+*.spec
+
 # ── 合并计划（内部文档，不上传）──
 MERGE_PLAN.md
 
