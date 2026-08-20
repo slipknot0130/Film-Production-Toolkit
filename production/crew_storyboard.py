@@ -80,7 +80,12 @@ import sys
 import json
 import logging
 from dotenv import load_dotenv
-from crewai import Agent, Task, Crew, Process, LLM
+try:
+    from crewai import Agent, Task, Crew, Process, LLM
+except ImportError:
+    # crewai 为可选依赖（仅分镜工作台需要）。桌面安装版未内置，
+    # 打包时 PyInstaller 会排除 crewai，此处降级为 None 避免打包失败。
+    Agent = Task = Crew = Process = LLM = None
 
 load_dotenv()
 
@@ -1953,7 +1958,6 @@ def run_production_pipeline(
                 t_qa.join()
                 
                 # 合并结果
-                from crewai import CrewOutput
                 class ParallelCrewOutput:
                     def __init__(self, director, qa):
                         self.tasks_output = []
