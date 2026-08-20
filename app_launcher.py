@@ -1,13 +1,10 @@
 """
-AI Screenwriter & Production Toolkit - Desktop Shell
-======================================================
-用 PyWebView 把 Streamlit 网页应用包装成独立桌面窗口。
+AI Screenwriter & Production Toolkit - Web UI Launcher
+=======================================================
+提供 Streamlit 本地服务启动逻辑，供 start.py 的网页版调用。
 
-运行方式：
-  开发环境: python desktop_app.py
-  打包环境: 由 PyInstaller 生成 FilmProductionToolkit.exe 后双击运行
-
-Windows / macOS 通用。
+不再包含任何桌面窗口（PyWebView）打包相关代码。
+用户只需拉取代码，运行 `python start.py` 即可在浏览器使用 Web UI。
 """
 
 import os
@@ -24,11 +21,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("desktop_app.log", encoding="utf-8"),
+        logging.FileHandler("app_launcher.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
-logger = logging.getLogger("desktop_app")
+logger = logging.getLogger("app_launcher")
 
 
 # ── 路径处理：打包后 vs 源码运行 ────────────────────────────────────────────
@@ -154,7 +151,7 @@ def _wait_for_server(port: int, timeout: float = 60.0) -> bool:
 
 
 def _log_streamlit_output(proc: subprocess.Popen) -> None:
-    """后台线程：把 Streamlit 日志输出到 desktop_app.log。"""
+    """后台线程：把 Streamlit 日志输出到 app_launcher.log。"""
     try:
         for line in proc.stdout:
             if line:
@@ -163,82 +160,6 @@ def _log_streamlit_output(proc: subprocess.Popen) -> None:
         logger.error("读取 Streamlit 日志出错: %s", exc)
 
 
-# ── PyWebView 窗口 ──────────────────────────────────────────────────────────
-def create_window(url: str, width: int = 1440, height: int = 900) -> None:
-    """创建桌面窗口并加载本地 Streamlit 服务。"""
-    import webview  # 延迟导入：仅桌面模式需要，浏览器模式无需安装
-    webview.create_window(
-        title=APP_TITLE,
-        url=url,
-        width=width,
-        height=height,
-        min_size=(1024, 640),
-        text_select=True,
-        confirm_close=True,
-    )
-    webview.start(
-        debug=False,
-        http_server=False,
-        user_agent="FilmProductionToolkitDesktop/1.0",
-    )
+# 本模块只提供 Streamlit 本地启动器逻辑（供 start.py 网页版调用）。
+# 不再包含任何桌面窗口（PyWebView）打包相关代码。
 
-
-# ── 主流程 ─────────────────────────────────────────────────────────────────
-def main() -> int:
-    logger.info("=" * 60)
-    logger.info("  %s v1.0 - Desktop", APP_TITLE)
-    logger.info("  APP_DIR:  %s", APP_DIR)
-    logger.info("  WORK_DIR: %s", WORK_DIR)
-    logger.info("=" * 60)
-
-    # 首次运行：从 .env.example 复制一份 .env（不覆盖已有）
-    env_example = os.path.join(APP_DIR, ".env.example")
-    env_file = os.path.join(WORK_DIR, ".env")
-    if os.path.exists(env_example) and not os.path.exists(env_file):
-        try:
-            with open(env_example, "r", encoding="utf-8") as src, \
-                 open(env_file, "w", encoding="utf-8") as dst:
-                dst.write(src.read())
-            logger.info("已创建默认 .env 配置文件: %s", env_file)
-        except Exception as exc:
-            logger.warning("复制 .env.example 失败: %s", exc)
-
-    port = _find_free_port()
-    proc = _start_streamlit(port)
-
-    # 启动日志转发线程
-    log_thread = threading.Thread(target=_log_streamlit_output, args=(proc,), daemon=True)
-    log_thread.start()
-
-    logger.info("等待 Streamlit 服务就绪 (port=%d)...", port)
-    if not _wait_for_server(port, timeout=60.0):
-        logger.error("Streamlit 服务在 60 秒内未启动")
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        return 1
-
-    url = f"http://127.0.0.1:{port}"
-    logger.info("Streamlit 已就绪，打开桌面窗口: %s", url)
-
-    try:
-        create_window(url)
-    except Exception as exc:
-        logger.exception("桌面窗口异常退出: %s", exc)
-    finally:
-        logger.info("正在关闭 Streamlit 子进程...")
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        logger.info("已退出")
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
