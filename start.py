@@ -1,17 +1,13 @@
 """
-AI Screenwriter & Production Toolkit - Unified Launcher
+AI Screenwriter & Production Toolkit - Web UI Launcher
 =======================================================
-统一入口：支持两种运行形态，底层共用同一套 Streamlit 服务启动逻辑。
+网页版启动器：拉取代码后直接运行 `python start.py`，
+自动启动 Streamlit 服务并在浏览器打开网页版。
 
 用法：
-  python start.py            # 默认：源码运行时用浏览器打开网页版；打包(exe)运行时用桌面窗口
-  python start.py --browser  # 强制用系统默认浏览器打开网页版
-  python start.py --desktop  # 强制用 PyWebView 桌面窗口打开
+  python start.py   # 启动网页版（自动安装缺失依赖、打开默认浏览器）
 
-自动分流规则（无参数时）：
-  - 源码运行（sys.frozen=False，拷贝代码文件夹直接跑）→ 浏览器网页版
-  - 打包运行（sys.frozen=True，双击 exe）               → 桌面窗口版
-
+说明：本项目不再提供打包好的桌面安装包，用户拉取源码本地运行即可。
 Windows 双击安全（已处理 GBK/ASCII 编码问题）。
 """
 
@@ -61,13 +57,6 @@ def _check_dependencies() -> None:
     for pkg in ["openai", "httpx", "pandas"]:
         _ensure_dependency(pkg)
 
-    # 桌面模式依赖
-    try:
-        import pywebview  # noqa: F401
-    except ImportError:
-        print("[WARN] pywebview not installed. Desktop mode will be unavailable.")
-        print("       Install with: pip install pywebview")
-
     # 可选依赖
     try:
         import crewai
@@ -79,15 +68,15 @@ def _check_dependencies() -> None:
 
 def _launch_browser_mode(port: int) -> int:
     """浏览器模式：启动 Streamlit 并打开系统默认浏览器。"""
-    import desktop_app
-    proc = desktop_app._start_streamlit(port)
+    import app_launcher
+    proc = app_launcher._start_streamlit(port)
     log_thread = __import__("threading").Thread(
-        target=desktop_app._log_streamlit_output, args=(proc,), daemon=True
+        target=app_launcher._log_streamlit_output, args=(proc,), daemon=True
     )
     log_thread.start()
 
     print(f"[INFO] 等待 Streamlit 服务就绪 (port={port})...")
-    if not desktop_app._wait_for_server(port, timeout=60.0):
+    if not app_launcher._wait_for_server(port, timeout=60.0):
         print("[ERROR] Streamlit 服务在 60 秒内未启动")
         proc.terminate()
         try:
@@ -114,45 +103,17 @@ def _launch_browser_mode(port: int) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="AI 剧本创作和制片管理综合工具 - 统一启动器"
-    )
-    parser.add_argument(
-        "--browser",
-        action="store_true",
-        help="强制使用系统默认浏览器打开网页版",
-    )
-    parser.add_argument(
-        "--desktop",
-        action="store_true",
-        help="强制使用 PyWebView 桌面窗口打开",
-    )
-    args = parser.parse_args()
-
-    # 模式判断：
-    #   1. 显式 --browser → 浏览器网页版
-    #   2. 显式 --desktop → 桌面窗口版
-    #   3. 默认：源码运行(sys.frozen=False) → 浏览器网页版；打包运行(sys.frozen=True) → 桌面窗口版
-    is_frozen = bool(getattr(sys, "frozen", False))
-    if args.browser:
-        use_browser = True
-    elif args.desktop:
-        use_browser = False
-    else:
-        use_browser = not is_frozen
-
     # Switch to the directory where this script lives
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
     print()
     print("=" * 60)
-    print("  AI Screenwriter & Production Toolkit v1.0")
+    print("  AI 剧本创作和制片管理综合工具 v1.0")
     print("  Creator Engine + Production Engine")
     print("=" * 60)
     print()
     print(f"  Working dir: {os.getcwd()}")
-    print(f"  Run mode: {'打包运行(exe)' if is_frozen else '源码运行'}")
-    print(f"  UI mode: {'浏览器网页版' if use_browser else '桌面窗口版'}")
+    print(f"  UI mode: 浏览器网页版")
     print()
 
     # --- Check Python version ---
@@ -172,15 +133,10 @@ def main() -> int:
     # --- Check/install dependencies ---
     _check_dependencies()
 
-    # --- Launch ---
-    if use_browser:
-        import desktop_app
-        port = desktop_app._find_free_port()
-        return _launch_browser_mode(port)
-    else:
-        # 复用 desktop_app 的完整桌面启动流程
-        import desktop_app
-        return desktop_app.main()
+    # --- Launch web UI in browser ---
+    import app_launcher
+    port = app_launcher._find_free_port()
+    return _launch_browser_mode(port)
 
 
 if __name__ == "__main__":

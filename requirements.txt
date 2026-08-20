@@ -6,10 +6,7 @@ httpx>=0.24.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 python-docx>=0.8.11
-pywebview>=4.4.0
 # CrewAI 依赖（仅分镜工作台需要，可选安装）
 # 如果不使用分镜功能，以下依赖可忽略
 crewai>=0.28.0
 langchain-openai>=0.1.0
-# 打包依赖（开发/发布时使用）
-pyinstaller>=6.0.0
