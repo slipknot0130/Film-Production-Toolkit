@@ -645,7 +645,7 @@ def _clear_modification_state():
 
 
 # =============================================================================
-# 剧本改编功能
+# 剧本调整功能
 # =============================================================================
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -654,7 +654,7 @@ def _clear_modification_state():
 # ═════════════════════════════════════════════════════════════════════════════
 
 # 电影改编 System Prompt（单次调用 / 全局约束版）
-_REWRITE_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本改编为电影文学剧本（screenplay）。
+_REWRITE_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本调整为电影文学剧本（screenplay）。
 
 ## ⚠️ 最高约束：这是电影，不是电视剧
 - **绝对禁止输出「第X集」格式**。电影没有"集"的概念。
@@ -699,7 +699,7 @@ _REWRITE_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本�
 """
 
 # 电影分块改编专用 System Prompt（不含全局约束，避免与每块指令冲突）
-_CHUNK_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本改编为电影文学剧本（screenplay）。
+_CHUNK_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本调整为电影文学剧本（screenplay）。
 
 ## ⚠️ 最高约束：这是电影，不是电视剧
 - **绝对禁止输出「第X集」格式**。电影没有"集"的概念。
@@ -720,7 +720,7 @@ _CHUNK_MOVIE_PROMPT = """你是一位专业的电影编剧，擅长将剧本改�
 你必须严格遵守用户消息中的【场次要求】，不得输出「第X集」格式。"""
 
 # 情绪导向改编 Prompt（竖屏微短剧 / 短剧爽剧）
-_REWRITE_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
+_REWRITE_TV_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
 
 ## 核心原则（情绪导向 / 多巴胺爽剧）
 1. **痛点即钩子**：每集开头必须触发观众情绪痛点（被欺负/被看不起/反转打脸）
@@ -740,7 +740,7 @@ _REWRITE_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长
 - 确保每集都有强情绪点，不出现"平淡集"
 
 ## 输出格式
-请输出完整的改编后剧本，格式与原剧本保持一致。
+请输出完整的调整后剧本，格式与原剧本保持一致。
 每集用"========================================"分隔，开头标注"第X集"。
 
 ## ⚠️ 集数约束（最高优先级，绝对不可违反）
@@ -750,7 +750,7 @@ _REWRITE_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长
 # ═════════════════════════════════════════════════════════════════════════════
 # 分块改编专用 System Prompt（不含全局集数约束，避免与每块指令冲突）
 # ═════════════════════════════════════════════════════════════════════════════
-_CHUNK_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
+_CHUNK_TV_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长将剧本进行情绪导向改编。
 
 ## 核心原则（情绪导向 / 多巴胺爽剧）
 1. **痛点即钩子**：每集开头必须触发观众情绪痛点（被欺负/被看不起/反转打脸）
@@ -774,62 +774,6 @@ _CHUNK_EMOTION_PROMPT = """你是一位专业的竖屏微短剧编剧，擅长�
 ## 输出格式
 每集用"========================================"分隔，开头标注"第X集"。
 你必须严格遵守用户消息中的【集数要求】，一集不多，一集不少。"""
-
-_CHUNK_STRUCTURE_PROMPT = """你是一位专业的影视编剧，擅长将剧本进行结构导向改编，精通好莱坞三幕式、Save the Cat节拍表与麦基价值观冲突理论。
-
-## 核心原则（结构导向）
-1. **三幕结构完整性**：建置（约25%）→ 对抗（约50%）→ 解决（约25%）比例清晰
-2. **人物弧光**：主角必须有内在成长或蜕变，Ghost/Lie/Flaw 三角清晰
-3. **逻辑自洽**：人物动机要充分，情节转折有因果关系
-4. **节拍把控**：重要节拍点（触发事件/第一幕结/中间点/第二幕结/高潮）位置准确
-5. **主题强化**：每场戏都服务于主题，删除游离于主题之外的剧情
-
-## 合并策略（压缩时减少集数）
-- **必须合并**：将功能相似的场景合并，用更经济的叙事推进情节
-- **合并公式**：N集原文 → M集目标 = 每 (N/M) 集原文合并为1集目标
-- **示例**：15集原文→10集目标：将第1+2集合并为新第1集，第3+4集合并为新第2集，第5集保留为新第3集...以此类推
-- **保留原则**：核心结构节拍点、标志性对白必须保留；重复场景、冗余对话可删除或压缩
-- **禁止行为**：不得将每集原文简单复制为一集目标——必须真正合并内容
-
-## 拆分策略（扩充时增加集数/篇幅）
-- 深化人物弧光，增加内心戏和人物关系张力
-- 增加支线剧情，丰富世界观和配角塑造
-- 扩展关键场景，增加对白层次和潜台词
-- 补充"静谧时刻"（All is Lost / Dark Night of the Soul）
-
-## 输出格式
-每集用"========================================"分隔，开头标注"第X集"。
-你必须严格遵守用户消息中的【集数要求】，一集不多，一集不少。"""
-
-# 结构导向改编 Prompt（中长剧 / 电影）
-_REWRITE_STRUCTURE_PROMPT = """你是一位专业的影视编剧，擅长将剧本进行结构导向改编，精通好莱坞三幕式、Save the Cat节拍表与麦基价值观冲突理论。
-
-## 核心原则（结构导向）
-1. **三幕结构完整性**：建置（约25%）→ 对抗（约50%）→ 解决（约25%）比例清晰
-2. **人物弧光**：主角必须有内在成长或蜕变，Ghost/Lie/Flaw 三角清晰
-3. **逻辑自洽**：人物动机要充分，情节转折有因果关系
-4. **节拍把控**：重要节拍点（触发事件/第一幕结/中间点/第二幕结/高潮）位置准确
-5. **主题强化**：每场戏都服务于主题，删除游离于主题之外的剧情
-
-## 扩充时（增加集数/篇幅）
-- 深化人物弧光，增加内心戏和人物关系张力
-- 增加支线剧情，丰富世界观和配角塑造
-- 扩展关键场景，增加对白层次和潜台词
-- 补充"静谧时刻"（All is Lost / Dark Night of the Soul）
-
-## 压缩时（减少集数/篇幅）
-- 保留核心结构节拍点，删除重复或冗余场景
-- 合并功能相似的场景，用更经济的叙事手段推进情节
-- 确保主题信息不丢失，保留标志性对白
-
-## 输出格式
-请输出完整的改编后剧本，格式与原剧本保持一致。
-每集用"========================================"分隔，开头标注"第X集"（如为电影则按场次）。
-
-## ⚠️ 集数约束（最高优先级，绝对不可违反）
-{episode_constraint}
-"""
-
 
 def _parse_episode_numbers(instruction: str, source_text: str) -> tuple[int, int]:
     """
@@ -1048,7 +992,7 @@ def _split_source_by_scenes(source_text: str) -> list[dict]:
 
 
 # =============================================================================
-# 分块改编流水线核心函数
+# 分块调整流水线核心函数
 # =============================================================================
 
 def _split_source_by_episodes(source_text: str) -> list[dict]:
@@ -1114,13 +1058,12 @@ def _split_source_by_episodes(source_text: str) -> list[dict]:
 
 
 def _generate_story_summary(client, model, provider, source_text: str,
-                            rewrite_style: str, rewrite_instruction: str,
+                            rewrite_instruction: str,
                             extra: dict) -> str:
     """
     Phase 0：分析原始剧本，生成结构摘要（人物/情节线/设定/关键伏笔）。
     此摘要将作为后续每块改写的"全局记忆"传入。
     """
-    style_desc = "情绪导向（多巴胺爽剧）" if rewrite_style == "emotion" else "结构导向（三幕式）"
     summary_prompt = f"""你是一位资深剧本分析师。请对以下原始剧本进行全面分析，输出一份结构化摘要。
 
 ## 分析要求
@@ -1154,6 +1097,64 @@ def _generate_story_summary(client, model, provider, source_text: str,
 
     resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""
+
+
+def _generate_rewrite_report(client, model, provider, source_text: str,
+                             modified_text: str, instruction: str, work_type: str) -> str:
+    """
+    调整完成后生成「建议修改报告」：对比【原始剧本】与【调整后剧本】，
+    列出关键改动、一致性核查、优化建议与风险提醒，辅助用户决策。
+    """
+    unit = "场" if work_type == "movie" else "集"
+    system = (
+        "你是一位资深的剧本审读编辑与制片统筹。用户刚对剧本做了一次改编，"
+        "你需要对比【原始剧本】与【调整后剧本】，产出一份简明、可执行的「建议修改报告」。\n\n"
+        "报告必须严格使用以下 Markdown 五段结构：\n"
+        "## 一、改编概要\n用 2-3 句话说明本次改编依据用户指令完成了哪些核心改动"
+        "（扩集/缩集/人物调整/情节增删/类型转换等）。\n"
+        "## 二、关键改动清单\n用无序列表逐条列出 5-10 条关键改动（保留/新增/删除/调整），每条一句话。\n"
+        "## 三、一致性核查\n检查人物动机、时间线、逻辑链是否存在明显前后矛盾或漏洞，"
+        "没有则明确写「未发现明显一致性问题」。\n"
+        "## 四、优化建议\n给出 2-4 条具体、可执行的下一步修改建议（每条一句话）。\n"
+        "## 五、风险提醒\n如存在集数/场次未达标、节奏拖沓、情绪点不足等风险，明确标出；"
+        "无则写「暂无重大风险」。\n\n"
+        "使用简体中文，条理清晰，直接输出报告，不要额外寒暄。"
+    )
+    src_excerpt = source_text[:6000]
+    mod_excerpt = modified_text[:6000]
+    user = (
+        f"## 用户改编指令\n{instruction}\n\n"
+        f"## 原始剧本（节选前6000字）\n{src_excerpt}\n\n"
+        f"## 调整后剧本（节选前6000字）\n{mod_excerpt}\n\n"
+        f"## 任务\n请基于上述材料生成「建议修改报告」。注意：原始与调整后剧本可能较长，"
+        f"请基于用户指令和节选合理推断整体改动，并按要求的五段结构输出。"
+    )
+    is_ollama = "Ollama" in provider
+    kwargs = dict(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.4,
+        stream=True,
+    )
+    if is_ollama:
+        kwargs["extra_body"] = {"options": {"num_ctx": 131072, "num_predict": 4096}}
+    else:
+        kwargs["max_tokens"] = 4096
+    report = ""
+    try:
+        stream = client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                report += delta
+    except Exception:
+        report = ""
+    return report.strip()
 
 
 def _rewrite_single_chunk(client, model, provider, style_prompt: str,
@@ -1402,9 +1403,9 @@ def _compute_chunk_plan(src_ep: int, tgt_ep: int, source_blocks: list[dict]) -> 
 
 
 def _render_script_rewrite():
-    """剧本改编 Tab 的完整 UI"""
-    st.markdown("### ✂️ 剧本改编")
-    st.caption("上传原始剧本，填写改编指令（如「10集扩充为20集」），选择风格后一键改编")
+    """剧本调整 Tab 的完整 UI"""
+    st.markdown("### ✂️ 剧本调整")
+    st.caption("上传原始剧本，填写改编指令（如「10集扩充为20集」），选择剧本类型后一键调整")
 
     # ── 文件上传 ──
     uploaded = st.file_uploader(
@@ -1461,37 +1462,8 @@ def _render_script_rewrite():
         key="rewrite_instruction_input"
     )
 
-    # ── 风格选择 ──
-    st.markdown("**🎭 改编风格导向**")
-    style_col1, style_col2 = st.columns(2)
-    with style_col1:
-        is_emotion = st.toggle(
-            "🔥 情绪导向",
-            value=True,
-            key="rewrite_style_emotion",
-            help="竖屏微短剧/短剧：多巴胺爽剧节奏，情绪优先，每集必有爽点"
-        )
-    with style_col2:
-        is_structure = st.toggle(
-            "🏛 结构导向",
-            value=False,
-            key="rewrite_style_structure",
-            help="中长剧/电影：三幕结构、人物弧光、逻辑自洽，好莱坞工业标准"
-        )
-
-    # 互斥处理
-    if is_emotion and is_structure:
-        st.warning("⚠️ 请只选择一种风格导向")
-        return
-    if not is_emotion and not is_structure:
-        rewrite_style = "emotion"   # 默认情绪导向
-    elif is_emotion:
-        rewrite_style = "emotion"
-    else:
-        rewrite_style = "structure"
-
-    style_label = "🔥 情绪导向（多巴胺爽剧）" if rewrite_style == "emotion" else "🏛 结构导向（三幕式）"
-    st.caption(f"当前风格：{style_label}")
+    # 风格导向不再需要手动切换：电视剧自动采用情绪导向（多巴胺爽剧）标准，电影自动采用三幕式标准
+    st.caption("💡 改编标准由上方「剧本类型」自动决定：电视剧→情绪导向（多巴胺爽剧）标准，电影→三幕式标准，无需手动切换风格。")
 
     # ── 剧本类型（电影 / 电视剧）──  最高优先级开关
     st.markdown("**🎬 剧本类型**")
@@ -1522,14 +1494,15 @@ def _render_script_rewrite():
         work_type = "movie"
 
     wt_label = "📺 电视剧（按集）" if work_type == "tv" else "🎬 电影（按场次）"
-    st.caption(f"当前类型：{wt_label}")
+    std_label = "情绪导向（多巴胺爽剧）" if work_type == "tv" else "三幕式结构"
+    st.caption(f"当前类型：{wt_label}　|　改编标准：{std_label}（自动）")
 
     st.markdown("---")
 
-    # ── 开始改编按钮 ──
+    # ── 开始调整按钮 ──
     can_start = bool(source_text.strip()) and bool(rewrite_instruction.strip()) and not _ss("rewrite_running")
     if st.button(
-        "✂️ 开始改编",
+        "✂️ 开始调整",
         type="primary",
         use_container_width=True,
         disabled=not can_start
@@ -1543,24 +1516,23 @@ def _render_script_rewrite():
 
         _set_ss("rewrite_running", True)
         _set_ss("rewrite_result", "")
+        _set_ss("rewrite_report", "")
 
         # ═══════════════════════════════════════════════════════════════
         # 电影 / 电视剧 分流：解析目标单位 + 构建约束 + 选择 Prompt
         # ═══════════════════════════════════════════════════════════════
         if work_type == "movie":
-            # 电影：按场次(SCENE)解析，禁止输出「第X集」
+            # 电影：按场次(SCENE)解析，禁止输出「第X集」，采用三幕式标准结构
             src_ep, tgt_ep = _parse_movie_scenes(rewrite_instruction.strip(), source_text)
             episode_constraint = _build_movie_constraint(src_ep, tgt_ep, rewrite_instruction.strip())
             raw_style_prompt = _REWRITE_MOVIE_PROMPT
             chunk_style_prompt = _CHUNK_MOVIE_PROMPT
         else:
-            # 电视剧：按集数解析（原逻辑）
+            # 电视剧：按集数解析，自动采用电视剧标准（情绪导向/多巴胺爽剧），不再需要手动切换风格
             src_ep, tgt_ep = _parse_episode_numbers(rewrite_instruction.strip(), source_text)
             episode_constraint = _build_episode_constraint(src_ep, tgt_ep, rewrite_instruction.strip())
-            raw_style_prompt = _REWRITE_EMOTION_PROMPT if rewrite_style == "emotion" else _REWRITE_STRUCTURE_PROMPT
-            chunk_style_prompt = (
-                _CHUNK_EMOTION_PROMPT if rewrite_style == "emotion" else _CHUNK_STRUCTURE_PROMPT
-            )
+            raw_style_prompt = _REWRITE_TV_PROMPT
+            chunk_style_prompt = _CHUNK_TV_PROMPT
 
         style_prompt = raw_style_prompt.format(episode_constraint=episode_constraint)
 
@@ -1586,18 +1558,18 @@ def _render_script_rewrite():
 
         if work_type == "movie":
             if tgt_ep > 0 and src_ep > 0:
-                status_title = f"⏳ 正在改编（电影）：{src_ep}场 → {tgt_ep}场"
+                status_title = f"⏳ 正在调整（电影）：{src_ep}场 → {tgt_ep}场"
             elif tgt_ep > 0:
-                status_title = f"⏳ 正在改编（电影），目标 {tgt_ep} 场"
+                status_title = f"⏳ 正在调整（电影），目标 {tgt_ep} 场"
             else:
-                status_title = "⏳ 正在连接模型，准备改编（电影）..."
+                status_title = "⏳ 正在连接模型，准备调整（电影）..."
         else:
             if tgt_ep > 0 and src_ep > 0:
-                status_title = f"⏳ 正在改编：{src_ep}集 → {tgt_ep}集"
+                status_title = f"⏳ 正在调整：{src_ep}集 → {tgt_ep}集"
             elif tgt_ep > 0:
-                status_title = f"⏳ 正在改编，目标 {tgt_ep} 集"
+                status_title = f"⏳ 正在调整，目标 {tgt_ep} 集"
             else:
-                status_title = "⏳ 正在连接模型，准备改编..."
+                status_title = "⏳ 正在连接模型，准备调整..."
 
         status_box = st.status(status_title, expanded=True)
         progress_text = status_box.empty()
@@ -1653,7 +1625,7 @@ def _render_script_rewrite():
 ---
 
 ## 输出要求
-请严格按照上述改编指令，输出完整的改编后剧本。
+请严格按照上述改编指令，输出完整的调整后剧本。
 {f"目标集数：**{tgt_ep} 集**，从第1集写到第{tgt_ep}集，必须全部输出完整内容。" if tgt_ep > 0 else "按指令要求的集数输出完整改编剧本。"}
 每集用"========================================"分隔，开头标注"第X集"."""
 
@@ -1676,7 +1648,7 @@ def _render_script_rewrite():
                 if tgt_ep > 0:
                     unit = "场" if work_type == "movie" else "集"
                     progress_text.info(
-                        f"🎯 已识别改编目标：**{src_ep} {unit} → {tgt_ep} {unit}** | "
+                        f"🎯 已识别调整目标：**{src_ep} {unit} → {tgt_ep} {unit}** | "
                         f"单次调用模式 | 输出上限：{dynamic_max_tokens:,} tokens"
                     )
 
@@ -1691,7 +1663,7 @@ def _render_script_rewrite():
                     **extra
                 )
 
-                progress_text.markdown("🤖 模型已响应，正在生成改编内容...")
+                progress_text.markdown("🤖 模型已响应，正在生成调整内容...")
                 last_update = _time.time()
                 for chunk in stream:
                     if not chunk.choices:
@@ -1716,7 +1688,7 @@ def _render_script_rewrite():
                                 unit_info = f" | 已完成 **{done_units}/{tgt_ep}** 集" if tgt_ep > 0 else ""
                             elapsed = now - start_time
                             progress_text.markdown(
-                                f"🤖 正在生成改编内容... 已输出 **{char_count:,}** 字 | "
+                                f"🤖 正在生成调整内容... 已输出 **{char_count:,}** 字 | "
                                 f"用时 **{elapsed:.0f}** 秒{unit_info}"
                             )
                             result_area.markdown(full_result + " ▌")
@@ -1725,20 +1697,20 @@ def _render_script_rewrite():
 
             else:
                 # ═════════════════════════════════════════════════════════
-                # 大体量：分块改编流水线
+                # 大体量：分块调整流水线
                 # Phase 0 → Phase 1-N → Phase Final
                 # ═════════════════════════════════════════════════════════
                 unit_label = "场" if work_type == "movie" else "集"
                 progress_text.info(
-                    f"🎯 已识别改编目标：**{src_ep} {unit_label} → {tgt_ep} {unit_label}** | "
-                    f"体量较大，启用分块改编流水线..."
+                    f"🎯 已识别调整目标：**{src_ep} {unit_label} → {tgt_ep} {unit_label}** | "
+                    f"体量较大，启用分块调整流水线..."
                 )
 
                 # ── Phase 0：生成故事摘要 ──
                 progress_text.markdown("📋 **Phase 0/3**：正在分析原始剧本，生成全局摘要...")
                 story_summary = _generate_story_summary(
                     client, model, provider, source_text,
-                    rewrite_style, rewrite_instruction.strip(), {}
+                    rewrite_instruction.strip(), {}
                 )
                 if story_summary:
                     progress_text.markdown(
@@ -1962,9 +1934,22 @@ def _render_script_rewrite():
 
                 mode_label = "分块流水线" if need_chunking else "单次调用"
                 label = (
-                    f"✅ 改编完成（{mode_label}）| {len(full_result):,} 字{ep_summary} | {elapsed:.0f} 秒"
+                    f"✅ 调整完成（{mode_label}）| {len(full_result):,} 字{ep_summary} | {elapsed:.0f} 秒"
                 )
                 status_box.update(label=label, state="complete", expanded=False)
+
+                # ── 生成建议修改报告（对比原剧本与调整后剧本）──
+                try:
+                    progress_text.markdown("📝 正在生成建议修改报告...")
+                    report_text = _generate_rewrite_report(
+                        client, model, provider, source_text,
+                        full_result, rewrite_instruction.strip(), work_type
+                    )
+                    _set_ss("rewrite_report", report_text)
+                except Exception as _rep_e:
+                    _set_ss("rewrite_report", "")
+                    progress_text.warning(f"⚠️ 修改报告生成失败（不影响改编结果）：{_rep_e}")
+
                 if not ws_broken:
                     result_area.markdown(full_result)
 
@@ -1972,7 +1957,7 @@ def _render_script_rewrite():
                 if tgt_ep > 0 and final_ep_count < tgt_ep:
                     unit = "场" if work_type == "movie" else "集"
                     st.warning(
-                        f"⚠️ 改编输出 **{final_ep_count}** {unit}，未达到目标 **{tgt_ep}** {unit}。\n\n"
+                        f"⚠️ 调整输出 **{final_ep_count}** {unit}，未达到目标 **{tgt_ep}** {unit}。\n\n"
                         f"系统已自动尝试补写但仍未满足。可尝试：\n"
                         f"1. 缩减目标{unit}数（分步走）\n"
                         f"2. 换用支持更长上下文的模型\n"
@@ -1990,36 +1975,51 @@ def _render_script_rewrite():
                 from shared.session import CREATOR_SCRIPTS
                 _set_ss("workflow_stage", CREATOR_SCRIPTS)
                 status_box.update(
-                    label=f"⚠️ 改编中断（已保存部分结果 {len(full_result):,} 字）",
+                    label=f"⚠️ 调整中断（已保存部分结果 {len(full_result):,} 字）",
                     state="error", expanded=True
                 )
                 progress_text.error(f"生成过程中出错：{err_msg}")
                 progress_text.info("已保存的部分结果可在下方查看或下载。")
             else:
-                status_box.update(label="❌ 改编失败", state="error", expanded=True)
-                progress_text.error(f"改编失败：{err_msg}")
+                status_box.update(label="❌ 调整失败", state="error", expanded=True)
+                progress_text.error(f"调整失败：{err_msg}")
         finally:
             _set_ss("rewrite_running", False)
 
-    # ── 显示改编结果 ──
+    # ── 显示调整结果 ──
     rewrite_result = _ss("rewrite_result")
     if rewrite_result and not _ss("rewrite_running"):
         st.markdown("---")
-        st.success("✅ 改编完成！结果已同步到右侧「剧本正文」标签页")
+        st.success("✅ 调整完成！结果已同步到右侧「剧本正文」标签页")
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1:
             st.download_button(
-                "📥 下载改编后剧本",
+                "📥 下载调整后剧本",
                 rewrite_result,
-                file_name="改编剧本.md",
+                file_name="调整剧本.md",
                 mime="text/markdown",
                 use_container_width=True
             )
         with col_dl2:
-            if st.button("🔄 清空重新改编", use_container_width=True, key="rewrite_clear_btn"):
+            if st.button("🔄 清空重新调整", use_container_width=True, key="rewrite_clear_btn"):
                 _set_ss("rewrite_source_text", "")
                 _set_ss("rewrite_result", "")
+                _set_ss("rewrite_report", "")
                 st.rerun()
+
+        # ── 建议修改报告 ──
+        rewrite_report = _ss("rewrite_report")
+        if rewrite_report:
+            st.markdown("---")
+            st.markdown("### 📝 建议修改报告（AI 生成）")
+            st.markdown(rewrite_report)
+            st.download_button(
+                "📥 下载修改报告",
+                rewrite_report,
+                file_name="修改报告.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
 
 
 # =============================================================================
@@ -2836,7 +2836,7 @@ def render_creator():
         st.markdown("## 💡 灵感与控制")
         st.markdown("---")
 
-        left_tab_create, left_tab_rewrite = st.tabs(["🎬 创意生成", "✂️ 剧本改编"])
+        left_tab_create, left_tab_rewrite = st.tabs(["🎬 创意生成", "✂️ 剧本调整"])
 
         # =====================================================================
         # Tab A：创意生成（原有逻辑）
@@ -3109,7 +3109,7 @@ def render_creator():
                 st.session_state[_poll_key] = 0
 
         # =====================================================================
-        # Tab B：剧本改编
+        # Tab B：剧本调整
         # =====================================================================
         with left_tab_rewrite:
             _render_script_rewrite()
