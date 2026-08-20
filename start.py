@@ -4,9 +4,13 @@ AI Screenwriter & Production Toolkit - Unified Launcher
 统一入口：支持两种运行形态，底层共用同一套 Streamlit 服务启动逻辑。
 
 用法：
-  python start.py            # 默认：用 PyWebView 桌面窗口打开
-  python start.py --desktop  # 同上，显式指定桌面窗口
-  python start.py --browser  # 用系统默认浏览器打开网页版
+  python start.py            # 默认：源码运行时用浏览器打开网页版；打包(exe)运行时用桌面窗口
+  python start.py --browser  # 强制用系统默认浏览器打开网页版
+  python start.py --desktop  # 强制用 PyWebView 桌面窗口打开
+
+自动分流规则（无参数时）：
+  - 源码运行（sys.frozen=False，拷贝代码文件夹直接跑）→ 浏览器网页版
+  - 打包运行（sys.frozen=True，双击 exe）               → 桌面窗口版
 
 Windows 双击安全（已处理 GBK/ASCII 编码问题）。
 """
@@ -116,17 +120,26 @@ def main() -> int:
     parser.add_argument(
         "--browser",
         action="store_true",
-        help="使用系统默认浏览器打开网页版（默认使用 PyWebView 桌面窗口）",
+        help="强制使用系统默认浏览器打开网页版",
     )
     parser.add_argument(
         "--desktop",
         action="store_true",
-        help="使用 PyWebView 桌面窗口打开（默认）",
+        help="强制使用 PyWebView 桌面窗口打开",
     )
     args = parser.parse_args()
 
-    # 默认桌面模式；只有显式 --browser 才走浏览器
-    use_browser = args.browser and not args.desktop
+    # 模式判断：
+    #   1. 显式 --browser → 浏览器网页版
+    #   2. 显式 --desktop → 桌面窗口版
+    #   3. 默认：源码运行(sys.frozen=False) → 浏览器网页版；打包运行(sys.frozen=True) → 桌面窗口版
+    is_frozen = bool(getattr(sys, "frozen", False))
+    if args.browser:
+        use_browser = True
+    elif args.desktop:
+        use_browser = False
+    else:
+        use_browser = not is_frozen
 
     # Switch to the directory where this script lives
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -138,7 +151,8 @@ def main() -> int:
     print("=" * 60)
     print()
     print(f"  Working dir: {os.getcwd()}")
-    print(f"  Mode: {'浏览器模式' if use_browser else '桌面窗口模式'}")
+    print(f"  Run mode: {'打包运行(exe)' if is_frozen else '源码运行'}")
+    print(f"  UI mode: {'浏览器网页版' if use_browser else '桌面窗口版'}")
     print()
 
     # --- Check Python version ---
