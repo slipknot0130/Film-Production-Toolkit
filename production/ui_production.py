@@ -1204,7 +1204,16 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
             if not ensure_ollama_model(model_name):
                 return
 
-        from production.crew_storyboard import run_crew_on_chunk
+        try:
+            from production.crew_storyboard import run_crew_on_chunk
+        except ImportError:
+            st.error(
+                "⚠️ 分镜工作台需要 CrewAI 依赖，但当前环境未安装。\n\n"
+                "桌面安装版为控制体积与稳定性，未内置 CrewAI。"
+                "如需使用分镜功能，请改用源码版运行：\n\n"
+                "```bash\npip install -r requirements.txt\npython start.py\n```"
+            )
+            return
 
         # 第一步：提取人物小传
         with st.spinner("👤 视觉导演就位：正在全篇提取人物小传与视觉档案库..."):

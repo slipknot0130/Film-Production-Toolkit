@@ -15,8 +15,26 @@ permissions:
   contents: write
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  build:
+    name: Build (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows x64
+          - os: windows-latest
+            arch: x64
+          # Windows ARM64（public preview，仅公开仓库可用）
+          - os: windows-11-arm
+            arch: arm64
+          # macOS Intel
+          - os: macos-15-intel
+            arch: x64
+          # macOS Apple Silicon (M芯片)
+          - os: macos-latest
+            arch: arm64
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,29 +45,40 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
+        shell: bash
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
-          pip install -r requirements.txt
+          pip install -r requirements-core.txt
 
       - name: Build with PyInstaller
-        run: python build.py --zip
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          if [ "$VERSION" = "" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          python build.py --zip --version "$VERSION"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FilmProductionToolkit-windows
+          name: FilmProductionToolkit-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*.zip
 
   release:
-    needs: [build-windows]
+    name: Publish Release
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download Windows artifact
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          name: FilmProductionToolkit-windows
-          path: dist/windows
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -R dist
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -59,6 +88,6 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            dist/windows/*.zip
+            dist/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

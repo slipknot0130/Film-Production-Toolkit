@@ -92,7 +92,7 @@ def _build_pyinstaller_args(zip_output: bool = False) -> list:
     for src, dst in _collect_data_files():
         data_args.extend(["--add-data", f"{src}{sep}{dst}"])
 
-    # 隐藏导入：Streamlit、CrewAI、LangChain 等有大量动态导入
+    # 隐藏导入：Streamlit 等有大量动态导入
     hidden_imports = [
         "streamlit",
         "streamlit.web.cli",
@@ -109,14 +109,6 @@ def _build_pyinstaller_args(zip_output: bool = False) -> list:
         "webview",
         "webview.platforms.winforms",
         "webview.platforms.cocoa",
-        "crewai",
-        "crewai.agent",
-        "crewai.task",
-        "crewai.crew",
-        "crewai.process",
-        "langchain",
-        "langchain_openai",
-        "langchain_core",
         "pydantic",
         "pydantic_core",
     ]
@@ -134,8 +126,13 @@ def _build_pyinstaller_args(zip_output: bool = False) -> list:
     for name in hidden_imports:
         args.extend(["--hidden-import", name])
 
-    # 排除测试/开发用的大包（可选）
-    # args.extend(["--exclude-module", "pytest"])
+    # 排除 crewai / langchain（可选依赖，仅分镜工作台需要）
+    # 排除后安装包更小、打包更稳，避免 pydantic 版本冲突导致打包失败。
+    for name in [
+        "crewai", "crewai.agent", "crewai.task", "crewai.crew", "crewai.process",
+        "langchain", "langchain_openai", "langchain_core", "litellm", "chromadb",
+    ]:
+        args.extend(["--exclude-module", name])
 
     return args
 
@@ -153,17 +150,25 @@ def _run_pyinstaller(args: list) -> int:
         return subprocess.call(cmd)
 
 
-def _create_zip() -> str:
+def _detect_arch() -> str:
+    """识别当前机器架构，返回友好标签：x64 / arm64。"""
+    import platform
+    m = platform.machine().lower()
+    if m in ("amd64", "x86_64", "x64", "i386", "i686"):
+        return "x64"
+    if m in ("arm64", "aarch64"):
+        return "arm64"
+    return m or "unknown"
+
+
+def _create_zip(version: str = "1.0.0") -> str:
     """把产物压缩成 zip，便于 GitHub Release 分发。"""
     dist_dir = Path("dist") / APP_NAME
     if not dist_dir.exists():
         raise FileNotFoundError(f"找不到产物目录: {dist_dir}")
 
-    zip_name = f"{APP_NAME}-v1.0.0-{sys.platform}"
-    if sys.platform == "win32":
-        zip_name += "-x64"
-    elif sys.platform == "darwin":
-        zip_name += "-universal"
+    arch = _detect_arch()
+    zip_name = f"{APP_NAME}-v{version}-{sys.platform}-{arch}"
 
     archive_path = Path("dist") / zip_name
     shutil.make_archive(str(archive_path), "zip", root_dir="dist", base_dir=APP_NAME)
@@ -173,12 +178,14 @@ def _create_zip() -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="打包 AI 剧本创作和制片管理综合工具为桌面程序")
     parser.add_argument("--zip", action="store_true", help="打包后额外生成 zip 压缩包")
+    parser.add_argument("--version", default="1.0.0", help="版本号，用于 zip 命名（例如 1.0.1）")
     args = parser.parse_args()
 
     print("=" * 60)
     print("  AI 剧本创作和制片管理综合工具 - 打包脚本")
     print("=" * 60)
     print(f"  平台: {sys.platform}")
+    print(f"  架构: {_detect_arch()}")
     print(f"  Python: {sys.version}")
     print(f"  入口: {ENTRY_SCRIPT}")
     print()
@@ -207,7 +214,7 @@ def main() -> int:
 
     if args.zip:
         try:
-            zip_path = _create_zip()
+            zip_path = _create_zip(version=args.version)
             print(f"  发布包: {zip_path}")
         except Exception as exc:
             print(f"[WARN] 生成 zip 失败: {exc}")
