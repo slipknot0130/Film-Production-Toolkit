@@ -22,6 +22,7 @@ from typing import Optional, Callable, List, Dict, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
+import time
 
 if TYPE_CHECKING:
     from harness.memory_store import StructuredMemoryStore
@@ -976,10 +977,86 @@ def call_llm(
             temperature=temperature,
             max_tokens=max_tokens
         )
-        content = response.choices[0].message.content
+        msg = response.choices[0].message
+        content = getattr(msg, "content", None) or ""
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        # ⚠️ 空内容必须判为失败：推理/思考型模型可能把答案放到 reasoning_content，
+        # 或 max_tokens 预算被思考过程耗尽导致 content 被截断为空（finish_reason=length）。
+        # 若把空串当成 success，上层会误报"生成完成"却拿到 0 字符，最终阶段一判失败且原因不明。
+        if not content.strip():
+            reasoning = getattr(msg, "reasoning_content", None) or ""
+            if reasoning.strip():
+                return AgentResult(
+                    success=False,
+                    content="",
+                    error=(
+                        f"模型返回空 content（finish_reason={finish_reason}），"
+                        f"但 reasoning_content 非空（{len(reasoning)} 字符）。"
+                        f"该模型可能将最终答案放入推理字段，需改用 reasoning_content 或关闭思考模式后重试。"
+                    ),
+                )
+            return AgentResult(
+                success=False,
+                content="",
+                error=(
+                    f"模型返回空 content（finish_reason={finish_reason}）。"
+                    f"常见原因：max_tokens 预算被思考过程耗尽、内容被服务商过滤、或上游代理偶发返回空。"
+                ),
+            )
         return AgentResult(success=True, content=content)
     except Exception as e:
         return AgentResult(success=False, content="", error=str(e))
+
+
+def call_llm_retry(
+    client: OpenAI,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 8192,
+    max_retries: int = 2,
+) -> AgentResult:
+    """
+    带重试的 LLM 调用。
+
+    推理/思考型模型在某些服务商上会偶发返回空 content（答案进了 reasoning_content，
+    或 token 预算被思考过程吃光）。空内容现在被 call_llm 判为失败，这里在失败时进行有限重试：
+    - 重试时把 max_tokens 抬到该服务商上限，给思考型模型留出答案空间；
+    - 在 user_prompt 末尾追加"直接输出正文、禁止空白"的强制要求；
+    - 指数退避，避免对上游造成压力。
+
+    仅在「空内容/失败」时重试，正常成功一次即返回。
+    """
+    last: Optional[AgentResult] = None
+    for attempt in range(max_retries + 1):
+        eff_max = max_tokens
+        up = user_prompt
+        if attempt > 0:
+            try:
+                from shared.llm_config import resolve_output_cap
+                cap = resolve_output_cap(model_name=model)
+                if cap:
+                    eff_max = max(max_tokens, cap)
+            except Exception:
+                pass
+            up = (
+                user_prompt
+                + "\n\n⚠️ 重试强制要求：请直接输出完整正文内容，"
+                "不要只输出思考过程、推理过程或任何空白内容。"
+            )
+            time.sleep(min(2 * attempt, 6))
+        last = call_llm(
+            client=client,
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=up,
+            temperature=temperature,
+            max_tokens=eff_max,
+        )
+        if last.success and last.content.strip():
+            return last
+    return last  # type: ignore[return-value]
 
 
 # =============================================================================
@@ -1112,7 +1189,7 @@ def run_showrunner_agent(
     mode_tag = "🎯 定向修改" if is_revision else ""
     callback.agent("架构师", f"正在{'精修大纲' if is_revision else '生成大纲'}...")
 
-    result = call_llm(
+    result = call_llm_retry(
         client=client,
         model=model,
         system_prompt=build_showrunner_prompt(
@@ -1228,7 +1305,7 @@ def run_episode_writer_agent(
 5. 如果是大结局：情绪最高潮 + 核心悬念揭晓
 """
 
-    result = call_llm(
+    result = call_llm_retry(
         client=client,
         model=model,
         system_prompt=writer_prompt,
@@ -1307,7 +1384,7 @@ def run_episode_doctor_agent(
 请按照审查标准检查以上内容，并给出审查结果。
 """
 
-    result = call_llm(
+    result = call_llm_retry(
         client=client,
         model=model,
         system_prompt=build_doctor_prompt(
