@@ -153,7 +153,8 @@ _SHOWRUNNER_BASE_PROMPT = """你是一位经验丰富的影视剧本架构师和
 
 请务必仔细阅读用户的输入，提取用户明确要求的「总集数」。
 - 如果用户写了"30 集"、"50集"、"写20集"等 → 提取该数字
-- 如果用户没有明确指定集数 → 根据故事体量**默认设定为 20 集**
+- 如果用户没有明确指定集数，且剧本格式**不是**「默认（跟随创意要求）」→ 根据故事体量**默认设定为 20 集**
+- 若剧本格式为「默认（跟随创意要求）」→ **一律以用户创意中的字数/时长/类型要求为准**：创意含字数(如2000字)、时长(如5分钟)、短片、微电影、电影、单篇等信号时视为单篇作品(总集数:1)；未明确任何体量时**禁止默认 20 集**，视为单篇作品
 
 **在你输出的最开头，必须使用以下固定格式打印集数（不打印视为违规）：**
 ```
@@ -1078,6 +1079,83 @@ def parse_episode_count(outline: str) -> int:
     return 20
 
 
+# =============================================================================
+# 默认（跟随创意要求）模式：体量解析与硬性约束
+# =============================================================================
+DEFAULT_MODE_FORMAT = "默认（跟随创意要求）"
+
+# 单篇作品信号：出现这些词说明用户要的是一部/一篇完整作品，而非多集剧
+_SINGLE_WORK_SIGNALS = (
+    "字数", "字以内", "字左右", "短片", "微电影", "电影", "单篇",
+    "独幕", "短篇", "电影剧本", "符合电影剧本", "分钟", "时长",
+)
+
+
+def _default_mode_scope_directive(creative_idea: str) -> str:
+    """
+    默认（跟随创意要求）模式下，根据创意文本推断「单篇 / 多集」并返回硬性约束指令。
+
+    返回注入到 user_prompt 的约束文本（始终非空，仅在默认模式调用）。
+    优先级：显式集数 > 单篇信号(字数/时长/短片/电影) > 未明确(禁止默认20集)。
+    """
+    text = creative_idea or ""
+    # 1) 显式集数要求（如「写30集」「50集微短剧」）→ 严格按多集
+    m = re.search(r'(\d{1,3})\s*集', text)
+    if m:
+        n = int(m.group(1))
+        if 1 <= n <= 500:
+            return (
+                "## ⚠️ 默认模式体量约束（最高优先级，覆盖基础提示默认20集）\n"
+                f"用户创意中明确要求 **{n} 集**，请严格按多集规划，并在大纲最开头输出 "
+                f"`[总集数: {n}]`，逐集设计节奏。\n"
+            )
+    # 2) 单篇作品信号：字数 / 时长(分钟) / 短片 / 微电影 / 电影 / 单篇 ...
+    has_word_count = bool(re.search(r'\d+\s*字', text))
+    has_single = has_word_count or any(k in text for k in _SINGLE_WORK_SIGNALS)
+    if has_single:
+        return (
+            "## ⚠️ 默认模式体量约束（最高优先级，覆盖基础提示默认20集）\n"
+            "用户创意要求的是**单篇完整作品**（受字数/时长限制，或明确为短片/微电影/电影），"
+            "你必须在大纲最开头输出 `[总集数: 1]`，使用单篇剧本或场次(SCENE)结构，"
+            "**绝对禁止拆分为多集**。若为电影/短片，用 SCENE 场次结构而非「第X集」；"
+            "严格把篇幅控制在用户要求的字数/时长以内。\n"
+        )
+    # 3) 未明确任何体量信号：默认视为单篇，禁止默认20集
+    return (
+        "## ⚠️ 默认模式体量约束（最高优先级，覆盖基础提示默认20集）\n"
+        "用户未明确指定集数或体量。在默认模式下**禁止默认拆成 20 集**；"
+        "除非创意明显是长篇剧集（如明确多季多线），否则视为**单篇完整作品**输出 "
+        "`[总集数: 1]`。若你判断应为剧集，必须在大纲「基本信息」中明确说明理由。\n"
+    )
+
+
+def _enforce_default_mode_episode_count(creative_idea: str, content: str) -> str:
+    """
+    默认模式的安全网：若创意未显式要求多集、且含单篇信号，但模型仍写出 [总集数: N](N>1)，
+    则将标记强制纠正为 [总集数: 1]，避免下游把单篇拆成多集。
+    返回纠正后的内容（无变化则原样返回）。
+    """
+    if not content:
+        return content
+    # 创意里显式写了集数 → 不干预（尊重用户）
+    if re.search(r'\d{1,3}\s*集', creative_idea or ""):
+        return content
+    has_word_count = bool(re.search(r'\d+\s*字', creative_idea or ""))
+    has_single = has_word_count or any(k in (creative_idea or "") for k in _SINGLE_WORK_SIGNALS)
+    if not has_single:
+        return content
+    # 单篇信号存在，但标记 > 1 → 纠正
+    m = re.search(r'\[总集数[:：]\s*(\d+)\]', content)
+    if m and int(m.group(1)) > 1:
+        corrected = content.replace(m.group(0), "[总集数: 1]", 1)
+        corrected = (
+            "> ⚠️ 系统纠正：检测到创意要求单篇作品，但大纲误标为多集，"
+            "已强制改为 [总集数: 1]。\n\n" + corrected
+        )
+        return corrected
+    return content
+
+
 def extract_outline_summary(outline: str, max_chars: int = 1500) -> str:
     """提取大纲摘要"""
     if not outline:
@@ -1186,6 +1264,10 @@ def run_showrunner_agent(
 3. 规划全剧悬念弧线和多集节奏曲线
 """
 
+    # ── 默认（跟随创意要求）模式：注入硬性体量约束，杜绝默认20集 ──
+    if script_format == DEFAULT_MODE_FORMAT:
+        user_prompt += "\n\n" + _default_mode_scope_directive(creative_idea)
+
     mode_tag = "🎯 定向修改" if is_revision else ""
     callback.agent("架构师", f"正在{'精修大纲' if is_revision else '生成大纲'}...")
 
@@ -1203,6 +1285,12 @@ def run_showrunner_agent(
     )
 
     if result.success:
+        # 默认模式安全网：单篇创意却误标多集时强制纠正为 [总集数: 1]
+        if script_format == DEFAULT_MODE_FORMAT:
+            content = _enforce_default_mode_episode_count(creative_idea, result.content)
+            if content != result.content:
+                callback.warning("⚠️ 已按创意要求将大纲纠正为单篇作品（总集数: 1）")
+                result = AgentResult(success=True, content=content)
         episode_count = parse_episode_count(result.content)
         mode_tag = "🔥 多巴胺" if is_micro_drama_mode(script_format) else ""
         revision_tag = "🎯 定向修改" if is_revision else ""
@@ -1536,6 +1624,17 @@ def run_scripts_phase(
 
     callback.stage("系统", f"阶段 2/2：按集数循环生成剧本（共 {total_episodes} 集，{mode_tag}版）")
 
+    # 默认（跟随创意要求）模式：work_type 由创意内容判断（含「电影/微电影/长片」→ 场次结构），
+    # 其余格式按 script_format 是否含「电影」决定。避免默认模式被当成电视剧写成「第X集」。
+    if script_format == DEFAULT_MODE_FORMAT:
+        _idea = creative_idea or ""
+        work_type = "movie" if ("电影" in _idea or "微电影" in _idea
+                                or "场次" in _idea or "长片" in _idea) else "tv"
+    else:
+        work_type = "movie" if "电影" in (script_format or "") else "tv"
+    if work_type == "movie":
+        callback.info("🎬 电影模式：阶段二按场次(SCENE)结构生成单篇剧本，不拆分为多集")
+
     outline_summary = extract_outline_summary(outline)
     previous_summary = ""
     final_episode_scripts: List[str] = []
@@ -1613,6 +1712,7 @@ def run_scripts_phase(
                 previous_script=writer_prev if doctor_feedback else None,
                 user_feedback=doctor_feedback,
                 harness_memory_context=harness_memory_context,
+                work_type=work_type,
             )
 
             if not writer_result.success:

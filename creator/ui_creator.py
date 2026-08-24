@@ -400,8 +400,12 @@ def _execute_episode_revision_thread(episode_num, total_episodes, script_format,
     _set_ss("workflow_running", True)
     _set_ss("hitl_editing_episode", episode_num)
 
-    # 电影长片格式 → 电影模式（禁止拆集）
-    work_type = "movie" if "电影" in (script_format or "") else "tv"
+    # 电影长片格式 → 电影模式（禁止拆集）；默认模式依据已有大纲判断电影/电视
+    if script_format == "默认（跟随创意要求）":
+        _ol = outline or ""
+        work_type = "movie" if ("SCENE" in _ol or "场次" in _ol or "电影" in _ol) else "tv"
+    else:
+        work_type = "movie" if "电影" in (script_format or "") else "tv"
 
     creator_add_log(f"🎯 启动第 {episode_num} 集定向精修（编剧→医生审核）...", "system")
     creator_add_log(f"   修改意见：{user_feedback[:80]}...", "info")
