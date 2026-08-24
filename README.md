@@ -475,6 +475,36 @@ python start.py
 
 如使用本地 Ollama，确保 Ollama 服务已启动，工具将自动检测已安装的模型。
 
+### 🔄 在线更新（同步最新版本）
+
+本项目采用「拉取源码本地运行」模式，**无需重新下载安装包**。当你完成部署后，作者若在 GitHub 推送了新版本，你只需一条命令（或点几下按钮）即可同步，且**不会覆盖你本地未推送的改动**。
+
+#### 命令行方式（推荐）
+
+在项目根目录下执行：
+
+```bash
+python update.py            # 拉取最新代码 + 按需重装依赖，随后提示重启
+python update.py --check    # 仅检查是否有更新，不改动任何文件
+python update.py --restart  # 更新完成后自动重启应用
+```
+
+`update.py` 的工作逻辑：
+
+- **快进合并**：仅接受线性前进（`git pull --ff-only`），绝不会覆盖你本地未提交的改动；若因本地改动无法快进，会明确提示你如何处理（`git reset --hard origin/main`）。
+- **自动免密拉取**：公开仓库会自动将 SSH 远程（`git@github.com:...`）降级为 HTTPS 匿名拉取，无需配置密钥；私有仓库需自行配好具备读取权限的 SSH Key 或 Token。
+- **智能装依赖**：仅当 `requirements.txt` 本次更新发生变化时才执行 `pip install -r requirements.txt`，避免无谓重装。
+
+#### 网页内一键更新
+
+应用左侧栏底部有「🔄 在线更新」折叠区：
+
+- **检查更新**：显示当前版本（git 短哈希 + 日期）并联网检查是否有新版本
+- **应用更新**：拉取最新代码，完成后提示重启
+- **重启应用**：自动启动新实例并加载最新代码
+
+> ⚠️ **前置条件**：更新功能依赖本地已安装 `git` 且能访问 GitHub（公开仓库即可）。若你不是通过 `git clone` 获得的源码（例如手动下载 ZIP 包），请改用 `git clone https://github.com/slipknot0130/Film-Production-Toolkit.git` 获取，以保持可更新能力。
+
 ---
 
 ## 📁 项目结构
@@ -483,6 +513,7 @@ python start.py
 Film-Production-Toolkit/
 ├── app.py                    # 主入口，侧边栏 + 模式路由
 ├── start.py                 # 启动器（自动检测依赖+端口）
+├── update.py                # 本地在线更新器（同步 GitHub 最新版）
 ├── setup_and_run.bat        # Windows 一键部署脚本
 ├── requirements.txt         # Python依赖
 ├── .env.example             # 环境变量模板（API Key等）

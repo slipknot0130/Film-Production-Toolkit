@@ -115,6 +115,9 @@ def main() -> int:
     print(f"  Working dir: {os.getcwd()}")
     print(f"  UI mode: 浏览器网页版")
     print()
+    print("  更新方式: 终端执行 `python update.py` 同步最新版本")
+    print("           （或在网页左侧栏「🔄 在线更新」中一键更新）")
+    print()
 
     # --- Check Python version ---
     if sys.version_info < (3, 10):
