@@ -14,9 +14,74 @@ AI 剧本创作和制片管理综合工具
 import streamlit as st
 import time
 import os
+import sys
+import subprocess as _sp
 
 # 强制本地流量绕过代理
 os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
+
+
+# =============================================================================
+# 本地在线更新（部署用户同步 GitHub 最新版）
+# =============================================================================
+
+def _get_local_version():
+    """返回 (short_hash, date_str)，失败返回 ('unknown', '')。"""
+    try:
+        h = _sp.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.getcwd(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
+        ).stdout.strip() or "unknown"
+        d = _sp.run(
+            ["git", "log", "-1", "--format=%cs", "HEAD"],
+            cwd=os.getcwd(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=20,
+        ).stdout.strip()
+        return (h, d)
+    except Exception:
+        return ("unknown", "")
+
+
+def _run_updater(extra_args, timeout=400):
+    """运行仓库根目录的 update.py，返回合并后的输出文本。"""
+    try:
+        r = _sp.run(
+            [sys.executable, "update.py", *extra_args],
+            cwd=os.getcwd(), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        if not out.strip():
+            out = f"(命令退出码: {r.returncode})"
+        return out
+    except Exception as e:
+        return f"执行更新失败: {e}"
+
+
+def _restart_app():
+    """启动新的 start.py 实例后退出当前进程（实现无缝重启加载新代码）。"""
+    target = os.path.join(os.getcwd(), "start.py")
+    if not os.path.exists(target):
+        st.error("未找到 start.py，请手动重启应用。")
+        return
+    try:
+        flags = 0
+        kwargs = {}
+        if sys.platform == "win32":
+            flags = getattr(_sp, "DETACHED_PROCESS", 0) | getattr(
+                _sp, "CREATE_NEW_PROCESS_GROUP", 0
+            )
+        else:
+            kwargs["start_new_session"] = True
+        _sp.Popen(
+            [sys.executable, target], cwd=os.getcwd(),
+            creationflags=flags, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, **kwargs,
+        )
+        time.sleep(1.5)
+        os._exit(0)
+    except Exception as e:
+        st.error(f"自动重启失败：{e}，请手动运行 python start.py")
 
 # =============================================================================
 # 页面配置
@@ -368,6 +433,27 @@ with st.sidebar:
     模型: {current_model}
     </div>
     """, unsafe_allow_html=True)
+
+    # ── 在线更新（本地部署用户同步 GitHub 最新版）──
+    st.markdown("---")
+    with st.expander("🔄 在线更新（GitHub 最新版）", expanded=False):
+        st.caption("本地部署后，点此即可同步我在 GitHub 推送的最新版本，无需重新下载。")
+        _cur_h, _cur_d = _get_local_version()
+        st.markdown(f"**当前版本**：`{_cur_h}` （{_cur_d}）")
+
+        if st.button("🔍 检查更新", use_container_width=True, key="btn_update_check"):
+            with st.spinner("正在连接 GitHub 检查更新..."):
+                _out = _run_updater(["--check"], timeout=180)
+            st.code(_out, language="bash")
+
+        if st.button("⬇️ 应用更新（拉取最新代码）", use_container_width=True, key="btn_update_apply"):
+            with st.spinner("正在拉取最新代码（可能需要几十秒）..."):
+                _out = _run_updater([], timeout=400)
+            st.code(_out, language="bash")
+            if "更新完成" in _out or "已经是最新" in _out:
+                st.success("更新成功！点击下方按钮重启应用以加载新代码。")
+                if st.button("🔄 重启应用", use_container_width=True, key="btn_update_restart"):
+                    _restart_app()
 
 # =============================================================================
 # 主区域：根据 active_tab 路由到对应工作流
