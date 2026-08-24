@@ -49,7 +49,7 @@ if "api_key" not in st.session_state:
 if "selected_model" not in st.session_state:
     st.session_state.selected_model = "deepseek-v4-flash"
 if "script_format" not in st.session_state:
-    st.session_state.script_format = "竖屏微短剧（主打极速反转）"
+    st.session_state.script_format = "默认（跟随创意要求）"
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "📝 剧本创作"
 
@@ -345,13 +345,15 @@ with st.sidebar:
         st.session_state.script_format = script_format
 
         format_descriptions = {
-            "竖屏微短剧（主打极速反转）": "🔥 多巴胺爽剧 | 竖屏短视频 | 极速反转 | 情绪爆点",
-            "5-10分钟短片": "Want/Need/Arc、四段式结构",
-            "90分钟长片": "Ghost/Lie/Flaw、完整弧光",
-            "多集剧集": "季度规划、分集大纲"
+            "默认（跟随创意要求）": "🎨 不套用固定模板 | 由你在创意框中指定的字数/时长/集数/类型决定",
+            "竖屏微短剧（1-2分钟/集，主打极致情绪）": "🔥 多巴胺爽剧 | 竖屏短视频 | 极速反转 | 情绪爆点",
+            "短剧（5-10分钟/集，情绪与逻辑并重）": "Want/Need/Arc、四段式结构",
+            "中剧（10-20分钟/集，结构相对完善）": "多集叙事 | 结构完善",
+            "长剧（40-60分钟/集，标准电视剧制式）": "季度规划、分集大纲",
+            "电影长片（90-120分钟，工业标准与爆款节拍）": "Ghost/Lie/Flaw、完整弧光",
         }
         desc = format_descriptions.get(script_format, "")
-        if script_format == "竖屏微短剧（主打极速反转）":
+        if script_format == "竖屏微短剧（1-2分钟/集，主打极致情绪）":
             st.success(f"📖 {desc}")
         else:
             st.info(f"📖 {desc}")
