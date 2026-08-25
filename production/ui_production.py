@@ -1065,10 +1065,14 @@ def _render_scene_result(global_scenes):
 # =============================================================================
 
 def _run_light_storyboard(script_content, style_tokens_input, provider, client, model_name, kwargs, render_fn):
-    """无 CrewAI 的轻量分镜引擎：逐块调用 extract_storyboard（OpenAI SDK 直调）。
+    """无 CrewAI 的轻量分镜引擎（v4 密度感知）：逐块调用 extract_storyboard（OpenAI SDK 直调）。
 
-    与 CrewAI 4-Agent 路径输出同构（镜头号/时间码/景别机位运镜/终极Seedance提示词），
-    确保下游渲染、Excel 下载逻辑完全复用。用于未安装 CrewAI 的环境（如 Mac M1）。
+    与 CrewAI 4-Agent 路径**完全复用同一套 v4 密度规划**（plan_storyboard_chunks →
+    split_script_smart → force_min_chunks → 缺口补足重跑），仅把逐块执行器从
+    run_crew_on_chunk 换成 extract_storyboard。因此未安装 CrewAI 的任何芯片
+    （Mac M1/M4、Windows、Linux）一键部署后都能拿到与 4-Agent 矩阵**同等质量**的分镜，
+    输出字段结构（镜头号/时间码/景别机位运镜/终极Seedance提示词）与下游渲染、Excel
+    下载逻辑完全同构。用于未安装 CrewAI 的环境。
     """
     # 第一步：提取人物小传
     with st.spinner("👤 视觉导演就位：正在全篇提取人物小传与视觉档案库..."):
@@ -1079,32 +1083,91 @@ def _run_light_storyboard(script_content, style_tokens_input, provider, client, 
         raw_scenes = extract_scenes(script_content, client, model_name, kwargs)
         global_scenes = extract_scene_visual_prompts(raw_scenes, script_content, client, model_name, kwargs)
 
-    # 切块：轻量引擎用适中块大小，保证单次 JSON 输出可被稳定解析
-    chunks = split_script_smart(script_content, max_chars=2500)
-    st.success(f"第二步：启动轻量分镜引擎，对 {len(chunks)} 个切块进行分镜（OpenAI 直调，无需 CrewAI）...")
+    # ── 动态 SAFE_CAP：根据模型输出上限自动调整单块镜数天花板 ──
+    _dynamic_cap = _SAFE_CAP  # 默认值，后续若能获取 max_tokens 可覆盖
+    try:
+        from production.crew_storyboard import resolve_output_cap, FALLBACK_MAX_OUTPUT
+        _model_name = st.session_state.get("selected_model", "")
+        _provider = st.session_state.llm_provider
+        _engine = st.session_state.get("engine_choice", "")
+        _output_cap = resolve_output_cap(_engine, _provider, _model_name) or FALLBACK_MAX_OUTPUT
+        _dynamic_cap = compute_dynamic_safe_cap(_output_cap)
+    except Exception:
+        pass
+
+    # ── v4 管线：①统计体量 → ②由体量算镜数 → ③模型容量反推切块数 → ④保证时长 ──
+    _target_duration_min = float(st.session_state.get("target_duration_min", 0.0) or 0.0)
+    _plan = plan_storyboard_chunks(
+        script_chars=len(script_content),
+        target_duration_min=_target_duration_min,
+        safe_cap=_dynamic_cap,
+        avg_shot_sec=_AVG_SHOT_SEC,
+    )
+    # 先按规划的块大小切，再用 force_min_chunks 保证块数达标（容量 ≥ 目标）
+    chunks = split_script_smart(script_content, max_chars=_plan["chunk_chars"])
+    chunks = force_min_chunks(chunks, _plan["num_chunks"], _plan["chunk_chars"])
+    st.success(
+        f"第二步：启动轻量 v4 分镜引擎，对 {len(chunks)} 个切块（≈{_plan['chunk_chars']} 字/块）"
+        f"进行分镜...（OpenAI 直调，无需 CrewAI；模型单块上限 {_dynamic_cap} 镜）"
+    )
+
+    _total_script_chars = max(sum(len(c) for c in chunks), 1)
+
+    _dur_display_map = {
+        0.0: "自动（按剧本字数密度）",
+        2.0: "短剧 · 2 分钟/集",
+        3.0: "竖屏短剧 · 3 分钟/集",
+        10.0: "标准 · 10 分钟/集",
+        45.0: "长剧单集 · 45 分钟/集",
+    }
+    if _target_duration_min > 0:
+        _mode_label = _dur_display_map.get(_target_duration_min, f"自定义 {_target_duration_min} 分钟/集")
+        st.info(
+            f"🎯 分镜模式：{_mode_label}｜目标 {_plan['demand_shots']} 镜 / {_target_duration_min:.0f} 分钟"
+            f"｜内容可支撑 {_plan['volume_shots']} 镜｜本模型单块上限 {_dynamic_cap} 镜×{len(chunks)} 块"
+            f"｜可达 {_plan['achievable_shots']} 镜 / {_plan['achievable_duration_sec']/60:.1f} 分钟"
+        )
+    else:
+        st.info(
+            f"🎯 分镜模式：自动（按剧本体量）｜预计 {_plan['achievable_shots']} 镜 "
+            f"/ {_plan['achievable_duration_sec']/60:.1f} 分钟｜切块 {len(chunks)} 块"
+        )
+
+    # ④ 可行性预警：内容不足以支撑目标时长时封顶并建议扩充剧本
+    if _plan["warning"]:
+        st.warning("⚠️ " + _plan["warning"])
 
     global_shots = []
+    global_atmosphere = ""  # 轻量引擎不单独生成全局氛围画质（extract_storyboard 无该返回）
     shot_num = 1
     accumulated_seconds = 0.0
-    global_atmosphere = ""
 
-    with st.spinner("🤖 轻量分镜引擎执行中（分镜导演 → 代码组装 Seedance 提示词）..."):
+    def _build_shot(s, shot_num, accumulated_seconds):
+        """把 extract_storyboard 的单条结果构造成与 4-Agent 矩阵同构的字段结构。"""
+        s = dict(s) if not isinstance(s, dict) else s
+        s["镜头号"] = shot_num
+        mm = int(accumulated_seconds // 60)
+        ss = int(accumulated_seconds % 60)
+        s["时间码"] = f"{mm:02d}:{ss:02d}"
+        s["景别机位运镜"] = f"{s.get('景别', '')}｜{s.get('画面描述', '')}".strip('｜').strip()
+        cn = s.get("中文提示词", "")
+        en = s.get("Nano Banana 2 英文提示词", "") or ""
+        s["终极Seedance提示词"] = (cn + ("\n" + en if en else "")).strip()
+        return s
+
+    with st.spinner("🤖 轻量 v4 分镜引擎执行中（分镜导演 → 代码组装 Seedance 提示词）..."):
         for i, chunk in enumerate(chunks):
             status_placeholder = st.empty()
-            status_placeholder.info(f"  正在处理第 {i + 1}/{len(chunks)} 个切块...")
+            status_placeholder.info(
+                f"  正在处理第 {i+1}/{len(chunks)} 个切块"
+                f"（时间码从 {int(accumulated_seconds//60):02d}:{int(accumulated_seconds%60):02d} 开始）..."
+            )
             try:
                 shots = extract_storyboard(chunk, global_chars, client, model_name, kwargs)
                 for s in shots:
                     if not isinstance(s, dict):
                         continue
-                    s["镜头号"] = shot_num
-                    mm = int(accumulated_seconds // 60)
-                    ss = int(accumulated_seconds % 60)
-                    s["时间码"] = f"{mm:02d}:{ss:02d}"
-                    s["景别机位运镜"] = f"{s.get('景别', '')}｜{s.get('画面描述', '')}".strip('｜').strip()
-                    cn = s.get("中文提示词", "")
-                    en = s.get("Nano Banana 2 英文提示词", "") or ""
-                    s["终极Seedance提示词"] = (cn + ("\n" + en if en else "")).strip()
+                    s = _build_shot(s, shot_num, accumulated_seconds)
                     accumulated_seconds += _AVG_SHOT_SEC
                     global_shots.append(s)
                     shot_num += 1
@@ -1112,13 +1175,61 @@ def _run_light_storyboard(script_content, style_tokens_input, provider, client, 
                 st.warning(f"⚠️ 第 {i + 1} 块分镜生成异常：{e}")
             status_placeholder.info(f"  第 {i + 1}/{len(chunks)} 块完成 ✓")
 
+    # ── v4 缺口补足重跑：产出不足「可达目标」时自动拆分重跑（封顶到内容可支撑范围）──
+    if _target_duration_min > 0 and global_shots:
+        _target_sec = _plan["achievable_duration_sec"]
+        _gap_sec = _target_sec - accumulated_seconds
+        if _gap_sec > _target_sec * 0.3 and len(global_shots) > 0:
+            st.warning(
+                f"🔄 检测到分镜缺口：目标 {_target_duration_min:.0f} 分钟，"
+                f"当前仅产出 {len(global_shots)} 镜 / {accumulated_seconds:.0f} 秒。"
+                f"正在启动缺口补足（拆分重跑低产切块）..."
+            )
+            _avg_per_char = len(global_shots) / max(_total_script_chars, 1)
+            _reshoot_chunks = []
+            for _ci, _ck in enumerate(chunks):
+                _expected_for_chunk = _avg_per_char * len(_ck) * 1.5  # 预期×1.5作为阈值
+                if _expected_for_chunk > _dynamic_cap * 0.8:
+                    _reshoot_chunks.append(_ci)  # 可能被截断了，加入重跑列表
+
+            if _reshoot_chunks:
+                _sub_chunks = []
+                for _ci in _reshoot_chunks:
+                    _sub = split_script_smart(chunks[_ci], max_chars=max(_plan["chunk_chars"] // 2, 150))
+                    _sub_chunks.extend(_sub)
+
+                if _sub_chunks:
+                    st.info(f"  拆分 {len(_reshoot_chunks)} 个低产切块为 {len(_sub_chunks)} 个子块，重新生成...")
+                    for _si, _sc in enumerate(_sub_chunks):
+                        _sp = st.empty()
+                        _sp.info(f"  补足：处理子块 {_si+1}/{len(_sub_chunks)}...")
+                        try:
+                            _s_shots = extract_storyboard(_sc, global_chars, client, model_name, kwargs)
+                            for _s in _s_shots:
+                                if not isinstance(_s, dict):
+                                    continue
+                                _s = _build_shot(_s, shot_num, accumulated_seconds)
+                                accumulated_seconds += _AVG_SHOT_SEC
+                                global_shots.append(_s)
+                                shot_num += 1
+                        except Exception as _sub_err:
+                            st.warning(f"  补足子块 {_si+1} 异常：{_sub_err}")
+                        _sp.info(f"  补足子块 {_si+1}/{len(_sub_chunks)} 完成 ✓")
+
+                    _total_min2 = int(accumulated_seconds // 60)
+                    _total_sec2 = int(accumulated_seconds % 60)
+                    st.success(
+                        f"✅ 补足完成！总计 {len(global_shots)} 镜 / "
+                        f"{_total_min2} 分 {_total_sec2} 秒"
+                    )
+
     if not global_shots:
         st.error("❌ 轻量分镜引擎未返回有效分镜，请检查 API 配置后重试。")
         return
 
     _total_min = int(accumulated_seconds // 60)
     _total_sec = int(accumulated_seconds % 60)
-    st.success(f"✅ 轻量分镜引擎完成！共 {len(global_shots)} 镜 / 约 {_total_min} 分 {_total_sec} 秒")
+    st.success(f"✅ 轻量 v4 分镜引擎完成！共 {len(global_shots)} 镜 / 约 {_total_min} 分 {_total_sec} 秒")
 
     # 缓存结果并渲染（与 CrewAI 路径一致）
     st.session_state.storyboard_chars = global_chars
@@ -1469,6 +1580,21 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
                             f"✅ 补足完成！总计 {len(global_shots)} 镜 / "
                             f"{_total_min2} 分 {_total_sec2} 秒"
                         )
+
+        # ── 根本保障：若 CrewAI 路径因运行时异常完全未产出分镜
+        #    （如 M1/M4 原生依赖偶发崩溃、模型返回异常），自动降级到轻量 v4 引擎，
+        #    保证一键部署后零配置仍能量产分镜，绝不把"空白页"丢给用户 ──
+        if not global_shots:
+            st.warning(
+                "⚠️ CrewAI 4-Agent 矩阵本次未产出有效分镜，自动降级到轻量 v4 引擎"
+                "（无需 CrewAI，质量同构）..."
+            )
+            _run_light_storyboard(
+                script_content, style_tokens_input,
+                provider, client, model_name, kwargs,
+                render_fn=_render_storyboard_results,
+            )
+            return
 
         # 第三步：缓存结果并渲染
         st.session_state.storyboard_chars = global_chars
