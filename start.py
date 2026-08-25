@@ -62,8 +62,9 @@ def _check_dependencies() -> None:
         import crewai
         print(f"[OK] crewai {crewai.__version__}")
     except ImportError:
-        print("[INFO] crewai not installed (optional, for storyboard workflow)")
-        print("       Install with: pip install crewai langchain-openai")
+        print("[INFO] crewai not installed (optional, for 4-Agent storyboard matrix)")
+        print("       Storyboard still works via the lightweight OpenAI engine.")
+        print("       Install 4-Agent matrix with: pip install -r requirements-crewai.txt")
 
 
 def _launch_browser_mode(port: int) -> int:

@@ -6,7 +6,8 @@ httpx>=0.24.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 python-docx>=0.8.11
-# CrewAI 依赖（仅分镜工作台需要，可选安装）
-# 如果不使用分镜功能，以下依赖可忽略
-crewai>=0.28.0
-langchain-openai>=0.1.0
+# CrewAI 依赖（仅分镜 4-Agent 矩阵需要，可选）
+# 已从核心依赖移出：未安装时分镜工作台会自动切换至轻量 OpenAI 直调引擎，功能可用。
+# 如需启用工业级 CrewAI 4-Agent 矩阵，请运行：pip install -r requirements-crewai.txt
+# crewai>=0.28.0
+# langchain-openai>=0.1.0

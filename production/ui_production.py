@@ -32,6 +32,7 @@ from production.analysis_engine import (
     extract_scenes,
     extract_characters,
     extract_scene_visual_prompts,
+    extract_storyboard,
 )
 from shared.llm_config import get_default_model, detect_script_format_by_volume
 from shared.script_preprocessor import (
@@ -1063,20 +1064,93 @@ def _render_scene_result(global_scenes):
 # 渲染4：分镜工作台
 # =============================================================================
 
+def _run_light_storyboard(script_content, style_tokens_input, provider, client, model_name, kwargs, render_fn):
+    """无 CrewAI 的轻量分镜引擎：逐块调用 extract_storyboard（OpenAI SDK 直调）。
+
+    与 CrewAI 4-Agent 路径输出同构（镜头号/时间码/景别机位运镜/终极Seedance提示词），
+    确保下游渲染、Excel 下载逻辑完全复用。用于未安装 CrewAI 的环境（如 Mac M1）。
+    """
+    # 第一步：提取人物小传
+    with st.spinner("👤 视觉导演就位：正在全篇提取人物小传与视觉档案库..."):
+        global_chars = extract_characters(script_content, client, model_name, kwargs)
+
+    # 第一步B：提取场景并生成场景固定资产提示词
+    with st.spinner("🏞️ 美术指导就位：正在提取场景并生成场景资产提示词..."):
+        raw_scenes = extract_scenes(script_content, client, model_name, kwargs)
+        global_scenes = extract_scene_visual_prompts(raw_scenes, script_content, client, model_name, kwargs)
+
+    # 切块：轻量引擎用适中块大小，保证单次 JSON 输出可被稳定解析
+    chunks = split_script_smart(script_content, max_chars=2500)
+    st.success(f"第二步：启动轻量分镜引擎，对 {len(chunks)} 个切块进行分镜（OpenAI 直调，无需 CrewAI）...")
+
+    global_shots = []
+    shot_num = 1
+    accumulated_seconds = 0.0
+    global_atmosphere = ""
+
+    with st.spinner("🤖 轻量分镜引擎执行中（分镜导演 → 代码组装 Seedance 提示词）..."):
+        for i, chunk in enumerate(chunks):
+            status_placeholder = st.empty()
+            status_placeholder.info(f"  正在处理第 {i + 1}/{len(chunks)} 个切块...")
+            try:
+                shots = extract_storyboard(chunk, global_chars, client, model_name, kwargs)
+                for s in shots:
+                    if not isinstance(s, dict):
+                        continue
+                    s["镜头号"] = shot_num
+                    mm = int(accumulated_seconds // 60)
+                    ss = int(accumulated_seconds % 60)
+                    s["时间码"] = f"{mm:02d}:{ss:02d}"
+                    s["景别机位运镜"] = f"{s.get('景别', '')}｜{s.get('画面描述', '')}".strip('｜').strip()
+                    cn = s.get("中文提示词", "")
+                    en = s.get("Nano Banana 2 英文提示词", "") or ""
+                    s["终极Seedance提示词"] = (cn + ("\n" + en if en else "")).strip()
+                    accumulated_seconds += _AVG_SHOT_SEC
+                    global_shots.append(s)
+                    shot_num += 1
+            except Exception as e:
+                st.warning(f"⚠️ 第 {i + 1} 块分镜生成异常：{e}")
+            status_placeholder.info(f"  第 {i + 1}/{len(chunks)} 块完成 ✓")
+
+    if not global_shots:
+        st.error("❌ 轻量分镜引擎未返回有效分镜，请检查 API 配置后重试。")
+        return
+
+    _total_min = int(accumulated_seconds // 60)
+    _total_sec = int(accumulated_seconds % 60)
+    st.success(f"✅ 轻量分镜引擎完成！共 {len(global_shots)} 镜 / 约 {_total_min} 分 {_total_sec} 秒")
+
+    # 缓存结果并渲染（与 CrewAI 路径一致）
+    st.session_state.storyboard_chars = global_chars
+    st.session_state.storyboard_scenes = global_scenes
+    st.session_state.storyboard_shots = global_shots
+    st.session_state.storyboard_atmosphere = global_atmosphere
+    st.session_state.storyboard_seconds = accumulated_seconds
+    st.session_state.storyboard_script_hash = hash(script_content)
+    render_fn(global_chars, global_scenes, global_shots, global_atmosphere, accumulated_seconds)
+
+
 def render_storyboard(uploaded_file, style_tokens_input=""):
-    """CrewAI 2-Agent 分镜工作台 v3.0 — 结构参数化 + 代码组装"""
-    st.markdown("## 🎥 分镜工作台（Seedance 2.0 结构参数化 v3.0）")
+    """分镜工作台 v3.1 — 双引擎：CrewAI 4-Agent 矩阵 / 轻量 OpenAI 直调（无 CrewAI 也可用）"""
+    st.markdown("## 🎥 分镜工作台（Seedance 2.0 结构参数化 v3.1）")
     st.caption("分镜导演输出结构化JSON → 代码组装Seedance提示词 | LLM专注创意 · 代码保证格式")
 
-    # 检测 CrewAI 可用性
+    # 检测 CrewAI 可用性（分镜支持两种引擎：CrewAI 4-Agent 矩阵 / 轻量 OpenAI 直调）
     try:
-        from crewai import Agent, Task, Crew, Process, LLM
+        from crewai import Agent, Task, Crew, Process, LLM  # noqa: F401
         crewai_ok = True
     except ImportError:
         crewai_ok = False
-        st.error("❌ 分镜工作台需要 crewai 依赖。请运行:")
-        st.code("pip install crewai langchain-openai", language="bash")
-        return
+
+    if not crewai_ok:
+        st.info(
+            "ℹ️ 当前环境未检测到 CrewAI，已自动切换至**轻量分镜引擎**（OpenAI 直调，无需额外依赖），"
+            "可正常生成分镜。\n"
+            "如需启用工业级 **CrewAI 4-Agent 矩阵**（多智能体协作、缺口自动补足），请运行：\n\n"
+            "```bash\n"
+            "pip install -r requirements-crewai.txt\n"
+            "```"
+        )
 
     if uploaded_file is None:
         st.info("📭 请在侧边栏上传剧本文件（.docx / .txt）")
@@ -1197,12 +1271,26 @@ def render_storyboard(uploaded_file, style_tokens_input=""):
     # ─────────────────────────────────────────────────────────────────────────
     # 点击启动：提取人物/场景 → 生成分镜 → 缓存到 session_state
     # ─────────────────────────────────────────────────────────────────────────
-    if st.button("🚀 启动 Seedance 2.0 分镜工作流（4-Agent串行）", type="primary", use_container_width=True, key="btn_run_storyboard"):
+    _engine_label = (
+        "🚀 启动 Seedance 2.0 分镜工作流（4-Agent串行）"
+        if crewai_ok else
+        "🚀 启动轻量分镜引擎（无需 CrewAI）"
+    )
+    if st.button(_engine_label, type="primary", use_container_width=True, key="btn_run_storyboard"):
         provider, client, model_name, kwargs = _get_production_llm()
 
         if "Ollama" in provider:
             if not ensure_ollama_model(model_name):
                 return
+
+        # ── 无 CrewAI 回退路径：轻量分镜引擎（OpenAI 直调）──
+        if not crewai_ok:
+            _run_light_storyboard(
+                script_content, style_tokens_input,
+                provider, client, model_name, kwargs,
+                render_fn=_render_storyboard_results,
+            )
+            return
 
         try:
             from production.crew_storyboard import run_crew_on_chunk

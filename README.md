@@ -460,11 +460,14 @@ pip install -r requirements.txt
 python start.py
 ```
 
-> 💡 **macOS 用户注意**：如需使用分镜工作台的 CrewAI 功能，需额外安装：
-> ```bash
-> ./venv/bin/python -m pip install crewai langchain-openai
-> ```
-> 在线更新请使用 `./venv/bin/python update.py`（或应用内左侧栏「🔄 在线更新」按钮），确保更新装到同一虚拟环境。
+> 💡 **macOS 用户注意**：
+> - **分镜工作台现已开箱即用**——未安装 CrewAI 时，程序会自动切换至「轻量分镜引擎」（OpenAI 直调），正常生成分镜。
+> - 仅在希望启用工业级 **CrewAI 4-Agent 矩阵**（多智能体协作、缺口自动补足）时才需额外安装：
+>   ```bash
+>   ./venv/bin/python -m pip install -r requirements-crewai.txt
+>   ```
+> - 若安装 CrewAI 在 Apple Silicon (M1/M2/M3) 上因个别原生依赖编译失败，**无需担心**：轻量分镜引擎不受任何影响，分镜功能照常可用。
+> - 在线更新请使用 `./venv/bin/python update.py`（或应用内左侧栏「🔄 在线更新」按钮），确保更新装到同一虚拟环境。
 
 ### 方式二：手动安装
 
@@ -531,7 +534,8 @@ Film-Production-Toolkit/
 ├── setup_and_run.bat        # Windows 一键部署脚本
 ├── setup_and_run.sh         # macOS / Linux 一键部署脚本
 ├── start.sh                 # macOS / Linux 一键启动脚本
-├── requirements.txt         # Python依赖
+├── requirements.txt         # 核心 Python 依赖（不含 CrewAI）
+├── requirements-crewai.txt   # 可选：CrewAI 4-Agent 分镜矩阵依赖
 ├── .env.example             # 环境变量模板（API Key等）
 ├── StyleTokens.txt          # 全局美术风格词（分镜用）
 │

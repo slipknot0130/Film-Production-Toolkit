@@ -64,15 +64,22 @@ if %errorlevel% neq 0 (
     echo   [OK] 核心依赖已安装
 )
 
-:: ── Step 4: 可选依赖检测 ──
+:: ── Step 4: 可选依赖 CrewAI（尽力安装，失败不阻断）──
 echo.
-echo [4/5] 检测可选依赖...
+echo [4/5] 可选依赖 CrewAI（分镜 4-Agent 矩阵，非必须）...
 python -c "import crewai" >nul 2>&1
 if %errorlevel% neq 0 (
-    echo   [INFO] CrewAI 未安装 — 分镜工作台功能不可用
-    echo          如需使用，请运行: pip install crewai langchain-openai
+    echo   [INFO] 正在尝试安装 CrewAI（失败不影响分镜轻量引擎）...
+    python -m pip install -r "%~dp0requirements-crewai.txt" --quiet 2>nul
+    if %errorlevel% equ 0 (
+        echo   [OK] CrewAI 安装成功（分镜 4-Agent 矩阵可用）
+    ) else (
+        echo   [WARN] CrewAI 安装失败（常见于 Mac M1 个别原生依赖编译）。
+        echo           分镜功能仍可用：程序会自动切换至轻量引擎（OpenAI 直调）。
+        echo           如需 4-Agent 矩阵，可手动重试: pip install -r requirements-crewai.txt
+    )
 ) else (
-    echo   [OK] CrewAI 已安装（分镜工作台可用）
+    echo   [OK] CrewAI 已安装（分镜 4-Agent 矩阵可用）
 )
 
 :: ── Step 5: 启动（源码运行默认网页版，浏览器打开）──

@@ -447,10 +447,11 @@ python start.py
 
 The browser will automatically open at `http://localhost:8501`.
 
-> 💡 **macOS users note**: For the CrewAI storyboard feature, install additionally:
+> 💡 **macOS users note**: The storyboard workbench works out of the box — without CrewAI it auto-falls back to a lightweight OpenAI engine. To enable the industrial **CrewAI 4-Agent matrix**, install additionally:
 > ```bash
-> pip install crewai langchain-openai
+> pip install -r requirements-crewai.txt
 > ```
+> If CrewAI fails to install on Apple Silicon (M1/M2/M3) due to a native dependency build error, don't worry — the lightweight storyboard engine is unaffected.
 
 ### Option 2: Manual Installation
 
