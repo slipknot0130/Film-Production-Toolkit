@@ -427,30 +427,44 @@ setup_and_run.bat
 
 #### macOS / Linux
 
-由于本项目在 Windows 环境下开发，macOS 的启动脚本可能不如原生环境便捷。请按以下步骤手动部署：
+项目提供了与 Windows 等价的一键脚本（`setup_and_run.sh` / `start.sh`），无需手动敲命令。
+
+**首次部署（一键安装 + 启动）：**
 
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/slipknot0130/Film-Production-Toolkit.git
 cd Film-Production-Toolkit
 
-# 2. 创建虚拟环境（推荐）
-python3 -m venv venv
-source venv/bin/activate
+# 2. 赋予脚本执行权限（仅首次）
+chmod +x setup_and_run.sh start.sh
 
-# 3. 安装依赖
+# 3. 一键部署：自动创建 venv → 安装依赖 → 启动应用
+./setup_and_run.sh
+```
+
+**后续启动（一键启动）：**
+
+```bash
+./start.sh
+```
+
+脚本将自动：检测 Python 版本 → 创建并激活 `./venv` 虚拟环境 → 安装依赖 → 启动应用并打开浏览器（`http://localhost:8501`）。
+> macOS 系统 pip 多为 externally-managed，脚本默认使用虚拟环境，避免污染系统 Python，也保证 `update.py` / `start.py` 共用同一套依赖。
+
+**手动部署（备用）：**
+
+```bash
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# 4. 启动应用
 python start.py
 ```
 
-浏览器将自动打开 `http://localhost:8501`。
-
-> 💡 **macOS用户注意**：如需使用分镜工作台的 CrewAI 功能，需额外安装：
+> 💡 **macOS 用户注意**：如需使用分镜工作台的 CrewAI 功能，需额外安装：
 > ```bash
-> pip install crewai langchain-openai
+> ./venv/bin/python -m pip install crewai langchain-openai
 > ```
+> 在线更新请使用 `./venv/bin/python update.py`（或应用内左侧栏「🔄 在线更新」按钮），确保更新装到同一虚拟环境。
 
 ### 方式二：手动安装
 
@@ -515,6 +529,8 @@ Film-Production-Toolkit/
 ├── start.py                 # 启动器（自动检测依赖+端口）
 ├── update.py                # 本地在线更新器（同步 GitHub 最新版）
 ├── setup_and_run.bat        # Windows 一键部署脚本
+├── setup_and_run.sh         # macOS / Linux 一键部署脚本
+├── start.sh                 # macOS / Linux 一键启动脚本
 ├── requirements.txt         # Python依赖
 ├── .env.example             # 环境变量模板（API Key等）
 ├── StyleTokens.txt          # 全局美术风格词（分镜用）
