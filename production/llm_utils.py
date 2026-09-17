@@ -65,10 +65,18 @@ def get_llm_client(provider, api_base, api_key):
 
 
 def get_llm_kwargs(provider):
-    """获取LLM调用参数"""
+    """获取LLM调用参数（max_tokens 按服务商上限自适应，避免 JSON 被截断 / 触发 400）。
+
+    历史缺陷：此处曾硬编码 8192，与 shared.llm_config.get_llm_kwargs 重复且同样过时。
+    DeepSeek 输出上限已提升到 384K，仍按 8192 请求会导致长剧本的
+    「全篇提取」（人物小传 / 场景表）JSON 被截断尾、解析全败。
+    """
     if "Ollama" in provider:
         return {"extra_body": {"options": {"num_ctx": 100000, "num_predict": 8192}}}
-    else:
+    try:
+        from shared.llm_config import resolve_output_cap, DEFAULT_MAX_OUTPUT
+        return {"max_tokens": resolve_output_cap(provider) or DEFAULT_MAX_OUTPUT}
+    except Exception:
         return {"max_tokens": 8192}
 
 

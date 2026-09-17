@@ -463,15 +463,15 @@ DEFAULT_AVG_SHOT_SEC = 4.5  # 默认平均镜长（秒），与 UI 预估口径�
 # ── 动态 SAFE_CAP 计算 ──
 # 每镜头 JSON 输出（画面内容≥80字 + felt_intent + 景别/机位/构图/运镜/出场角色等多字段 +
 #   JSON 结构键名开销）实测约 130~180 token；此处取 400 作保守估计，
-# 确保单块请求量稳稳落在模型输出上限内，杜绝「要求 26 镜→11K token→撞 8192 被截断」。
-# 安全容量 = max_tokens / 400（DeepSeek 8192 → 20 镜/块；16K → 40；32K → 81）
+# 确保单块请求量稳稳落在模型输出上限内，杜绝「要求 26 镜→11K token→撞上限被截断」。
+# 安全容量 = max_tokens / 400（8K → 20 镜/块；16K → 40；32K → 81）
 _TOKENS_PER_SHOT = 400  # 每镜头平均消耗 token 数（含 JSON 结构开销，保守值）
 
 def compute_dynamic_safe_cap(max_tokens: int = 8192) -> int:
     """
     根据模型实际输出 token 上限，动态计算单块安全镜数（动态值即权威，不再被 SAFE_CAP 地板抬升）。
-    - 8K token (DeepSeek-V4-Flash) → 20 镜/块
-    - 16K token → 40 镜/块
+    - 8K token → 20 镜/块
+    - 16K token（2026-09 起 DeepSeek 的实用预算）→ 40 镜/块
     - 32K token → 81 镜/块
     - 未知/本地模型(max_tokens<=0) → 返回 8 作为极保守下限
     """
@@ -572,7 +572,7 @@ def plan_storyboard_chunks(
     参数：
       script_chars: 剧本总字符数（调用方决定传全文字数还是屏幕内容字数）
       target_duration_min: 用户目标时长（分钟），<=0 表示自动模式（仅由体量决定）
-      safe_cap: 单块安全镜数上限（由模型 max_tokens 推算，如 DeepSeek 8192→29）
+      safe_cap: 单块安全镜数上限（由模型 max_tokens 推算，如 8K→20、16K→40 镜/块）
       avg_shot_sec: 平均每镜秒数
       chars_per_shot: 密度（字/镜）
       min_chunk_chars: 切块最小字符数（防止碎片化）

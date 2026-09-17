@@ -69,8 +69,8 @@ from shared.script_preprocessor import (  # noqa: E402
 # ─────────────────────────────────────────────────────────────────────────────
 def test_dynamic_safe_cap_by_model_output_limit():
     # 每镜头约 400 token（含 JSON 结构开销），安全容量 = max_tokens / 400
-    assert compute_dynamic_safe_cap(8192) == 20   # DeepSeek 类
-    assert compute_dynamic_safe_cap(16384) == 40  # 16K
+    assert compute_dynamic_safe_cap(8192) == 20   # 旧 DeepSeek 上限
+    assert compute_dynamic_safe_cap(16384) == 40  # 16K（2026-09 起 DeepSeek 的实用预算）
     assert compute_dynamic_safe_cap(32768) == 81  # 32K
     assert compute_dynamic_safe_cap(4096) == 10   # GLM 类（4095 上限）
     # 未知 / 本地模型（max_tokens<=0）：极保守下限 8，绝不返回 0 或负

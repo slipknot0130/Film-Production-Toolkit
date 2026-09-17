@@ -239,7 +239,7 @@ A new "🎯 Storyboard Target Duration (Density)" sub-option in the storyboard w
 
 **How it works:**
 - Once a target is selected, the program derives the **shot count** from `target seconds ÷ average shot seconds` (average shot seconds is a fixed reference assumption: 4.5s dialogue-heavy / 5.0s balanced / 4.0s action-heavy) and enforces it as a hard floor for the Director — under-splitting is forbidden.
-- In chunked mode, each chunk receives a share of the target duration **proportional to its character count**, ensuring overall density is met for long scripts; each chunk stays within the safe cap of 28 shots (prevents 8K token output truncation).
+- In chunked mode, each chunk receives a share of the target duration **proportional to its character count**, ensuring overall density is met for long scripts; the per-chunk shot cap is **derived from the selected model's output limit** (e.g. 16K → 40 shots/chunk, 8K → 20 shots/chunk), preventing truncated model output at the source.
 - **Reference duration ≠ forced duration**: the program only outputs the reference duration and the corresponding shot count; the actual length of each shot in Jimeng (Seedance) is set by you. For a short script (~5000 chars), the 45-min preset yields at most ~252 shots (~17 min reference); the UI warns "script too short" and will not pretend to hit the target — you can then lengthen individual shots in Jimeng to fill the final runtime.
 
 **QA safety net:** the QA Agent adds a "shot-count floor review" — if the actual output falls below the hard floor, it is flagged as failed and sent back for re-splitting.

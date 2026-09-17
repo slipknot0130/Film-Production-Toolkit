@@ -20,8 +20,11 @@ from typing import Optional, Tuple, List, Dict
 LLM_PROVIDERS: Dict[str, Dict[str, str]] = {
     # ── 国内主力 ──
     "DeepSeek": {
+        # 2026-09 官方模型体系：仅 deepseek-flash / deepseek-v4-pro 两个模型
+        # （旧名 deepseek-v4-flash / deepseek-chat / deepseek-reasoner 已下线或不再列出，
+        #   官方要求模型名使用 deepseek-flash）
         "base_url": "https://api.deepseek.com/v1",
-        "default_model": "deepseek-v4-flash",
+        "default_model": "deepseek-flash",
         "placeholder": "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     },
     "硅基流动 SiliconFlow": {
@@ -86,10 +89,12 @@ LLM_PROVIDERS: Dict[str, Dict[str, str]] = {
 # 二级联动：各服务商对应的可选模型列表
 MODEL_OPTIONS: Dict[str, List[str]] = {
     "DeepSeek": [
-        "deepseek-v4-flash",
+        # deepseek-flash：DeepSeek-V4.1-Flash，1M 上下文 / 输出上限 384K，
+        #   空闲 输入1元·输出4元 / 100万tokens，高峰（工作日 9-12、14-18）翻倍 → 便宜快
+        # deepseek-v4-pro：DeepSeek-V4-Pro-0813，1M 上下文 / 输出上限 384K，
+        #   空闲 输入4.5元·输出13.5元 / 100万tokens，高峰翻倍 → 质量更强、贵约 3 倍
+        "deepseek-flash",
         "deepseek-v4-pro",
-        "deepseek-chat",
-        "deepseek-reasoner",
     ],
     "硅基流动 SiliconFlow": [
         "deepseek-ai/DeepSeek-V3",
@@ -680,11 +685,18 @@ def get_default_model(provider: str) -> str:
 
 
 def get_llm_kwargs(provider: str) -> dict:
-    """获取LLM调用参数（Ollama需要特殊处理上下文长度）"""
+    """获取 LLM 调用参数（默认 max_tokens 按服务商上限自适应）。
+
+    历史缺陷：此处曾对所有云端服务商一律硬编码 8192，造成两个问题
+      ① DeepSeek 输出上限提升后仍按 8192 请求 → 长剧本的「全篇提取」
+         （人物小传 / 场景表 / 场景资产提示词）JSON 被截断尾，
+         5 层解析降级全部失败，最终返回空字典、下游分镜丢失人物与场景档案；
+      ② 对上限更低的服务商（如 GLM 4095）反而超额请求 → 直接 400 失败。
+    现改为统一走 resolve_output_cap()，各服务商各取所需（Ollama 仍特殊处理）。
+    """
     if "Ollama" in provider:
         return {"extra_body": {"options": {"num_ctx": 100000, "num_predict": 8192}}}
-    else:
-        return {"max_tokens": 8192}
+    return {"max_tokens": resolve_output_cap(provider) or DEFAULT_MAX_OUTPUT}
 
 
 # =============================================================================
@@ -692,11 +704,24 @@ def get_llm_kwargs(provider: str) -> dict:
 # =============================================================================
 # 各家 API 对 max_tokens 都有硬上限，**超过会直接返回 400，而不是自动截断**。
 # 历史 bug：分镜侧把 max_tokens 提到 16000、改编侧提到 16384~32768，
-# 在 DeepSeek（上限 8192）上一律请求失败，表现为「跑了很久却没有任何输出」。
+# 在旧版 DeepSeek（上限 8192）上一律请求失败，表现为「跑了很久却没有任何输出」。
 # 所有云端调用在传 max_tokens 前都应先过 clamp_max_tokens()。
+#
+# ⚠️ 本表同时被两处消费，改任一数值都必须把两个后果一起考虑：
+#   ① clamp_max_tokens() —— 拦掉会触发 400 的超限请求（「不要超过 API 允许值」口径）
+#   ② resolve_output_cap() → compute_dynamic_safe_cap() —— 用它反推分镜「单块镜数
+#      天花板」（= max_tokens / 400）。值越大 → 切块越少 → 单次输出越长。
+#
+# 2026-09 更新：DeepSeek 官方模型体系已大改，输出上限从 8192 提升到 384K
+#   （deepseek-flash / deepseek-v4-pro 均为 1M 上下文、最大输出 384K）。
+#   此处取 16384 而**不是** 384K，因为本表是「单次请求实用预算」而非纯硬上限：
+#   若照实填 384K，compute_dynamic_safe_cap() 会得出 960 镜/块，切块数塌缩为
+#   1 块、单次请求要吐几十万 token —— 既极慢极贵，长输出也必然质量崩坏。
+#   16384 刚好放行分镜侧长期请求的 16000（此前被 8192 钳死 → 长剧本的
+#   人物小传/场景表全篇提取 JSON 被截断、5 层解析全败），同时把单块镜数稳在 40。
 
 PROVIDER_MAX_OUTPUT: Dict[str, int] = {
-    "DeepSeek": 8192,
+    "DeepSeek": 16384,
     "硅基流动 SiliconFlow": 8192,
     "阿里通义 Qwen": 8192,
     "Kimi (Moonshot)": 8192,
@@ -710,7 +735,7 @@ PROVIDER_MAX_OUTPUT: Dict[str, int] = {
 
 # provider slug / 模型名关键词 → 上限（展示名对不上时的兜底匹配）
 _PROVIDER_CAP_ALIASES: Dict[str, int] = {
-    "deepseek": 8192,
+    "deepseek": 16384,
     "moonshot": 8192,
     "kimi": 8192,
     "siliconflow": 8192,

@@ -112,7 +112,8 @@ if "base_url" not in st.session_state:
 if "api_key" not in st.session_state:
     st.session_state.api_key = ""
 if "selected_model" not in st.session_state:
-    st.session_state.selected_model = "deepseek-v4-flash"
+    # 2026-09：DeepSeek 已下线 deepseek-v4-flash，官方模型名为 deepseek-flash
+    st.session_state.selected_model = "deepseek-flash"
 if "script_format" not in st.session_state:
     st.session_state.script_format = "默认（跟随创意要求）"
 if "active_tab" not in st.session_state:
