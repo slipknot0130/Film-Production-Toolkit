@@ -1098,7 +1098,14 @@ def _generate_story_summary(client, model, provider, source_text: str,
     if is_ollama:
         kwargs["extra_body"] = {"options": {"num_ctx": 131072, "num_predict": 8192}}
     else:
-        kwargs["max_tokens"] = 8192
+        # 摘要需覆盖「人物 / 情节线 / 设定 / 伏笔 / 情感弧线 / 改编方向」六大项，
+        # 长剧本下输出可能超出 8192 被截断；而这份摘要是后续每块改写的「全局记忆」，
+        # 一旦残缺会拖累整篇改编质量，故按所选模型的上限取预算。
+        try:
+            from shared.llm_config import resolve_output_cap
+            kwargs["max_tokens"] = resolve_output_cap(provider, model) or 8192
+        except Exception:
+            kwargs["max_tokens"] = 8192
 
     resp = client.chat.completions.create(**kwargs)
     return resp.choices[0].message.content or ""

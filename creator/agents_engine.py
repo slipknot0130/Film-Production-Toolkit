@@ -1271,6 +1271,17 @@ def run_showrunner_agent(
     mode_tag = "🎯 定向修改" if is_revision else ""
     callback.agent("架构师", f"正在{'精修大纲' if is_revision else '生成大纲'}...")
 
+    # 大纲（总集数 + 人物小传 + 悬念弧线 + 多集节奏）输出极易超出 8192，
+    # 故按所选模型的上限取预算，而不是固定 8192。
+    # 注意 max_tokens 是输出「上限」而非「目标」：放宽不会让短大纲多花钱，
+    # 但能避免长大纲被静默截断——call_llm 只检查内容非空、不检查 finish_reason，
+    # 若被截断但仍有内容，会被误判为「成功」并向下游返回残缺大纲。
+    try:
+        from shared.llm_config import resolve_output_cap
+        _outline_budget = resolve_output_cap(model_name=model) or 8192
+    except Exception:
+        _outline_budget = 8192
+
     result = call_llm_retry(
         client=client,
         model=model,
@@ -1281,7 +1292,7 @@ def run_showrunner_agent(
         ),
         user_prompt=user_prompt,
         temperature=0.7,
-        max_tokens=8192
+        max_tokens=_outline_budget
     )
 
     if result.success:

@@ -130,6 +130,7 @@ init_cross_mode_state()
 
 from shared.llm_config import (
     LLM_PROVIDERS, MODEL_OPTIONS, SCRIPT_FORMATS,
+    MODEL_INFO, PROVIDER_NOTES,
     update_base_url_placeholder, get_default_model,
     detect_ollama_models, ensure_ollama_model,
     create_openai_client, get_llm_kwargs,
@@ -171,6 +172,12 @@ with st.sidebar:
             help="选择该服务商下的具体模型版本"
         )
         st.session_state.selected_model = selected_model
+
+        # 模型说明：容量 / 价格 / 定位（辅助选型）
+        if selected_model in MODEL_INFO:
+            st.caption(f"💡 {MODEL_INFO[selected_model]}")
+        if provider in PROVIDER_NOTES:
+            st.caption(f"⏰ {PROVIDER_NOTES[provider]}")
 
     # Base URL
     if provider == "本地 Ollama":
